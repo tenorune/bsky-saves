@@ -1,0 +1,38 @@
+name: release
+
+# Fires on tag push of the form vX.Y.Z. The Actions tab will show one run
+# per tag pushed. Pushes to main do NOT trigger this — only tags do.
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    # Runs in the "pypi" GitHub Environment. The name must match the
+    # Environment field on PyPI's trusted-publisher page (configured once
+    # at https://pypi.org/manage/account/publishing/).
+    environment: pypi
+
+    # Required for PyPI trusted publishing: GitHub mints a short-lived OIDC
+    # token that PyPI verifies against the trusted-publisher claims, then
+    # issues a one-shot upload token. No long-lived API tokens.
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

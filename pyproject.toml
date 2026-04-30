@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "bsky-saves"
+version = "0.1.0"
+description = "BlueSky bookmarks ingestion toolkit: fetch, hydrate (article text, self-thread context, images), and merge into a JSON inventory."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.11"
+authors = [{ name = "tenorune" }]
+keywords = ["bluesky", "atproto", "bookmarks", "ingestion"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Internet",
+]
+dependencies = [
+  "httpx>=0.27",
+  "trafilatura>=1.10",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "respx>=0.21",
+]
+
+[project.urls]
+Homepage = "https://github.com/tenorune/bsky-saves"
+Issues = "https://github.com/tenorune/bsky-saves/issues"
+
+[project.scripts]
+bsky-saves = "bsky_saves.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bsky_saves"]
