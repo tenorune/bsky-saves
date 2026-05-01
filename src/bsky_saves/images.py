@@ -16,8 +16,46 @@ import hashlib
 import re
 import sys
 from pathlib import Path
+from typing import Iterator
 
 import httpx
+
+
+def _iter_image_urls(entry: dict) -> Iterator[str]:
+    """Yield every image URL referenced by an inventory entry.
+
+    Walks four locations, in order:
+      1. entry["images"]
+      2. entry["quoted_post"]["images"]
+      3. entry["thread_replies"][i]["images"]
+      4. entry["quoted_post"]["thread_replies"][i]["images"]
+
+    Empty / missing URLs are skipped. Order matches discovery order so
+    downstream consumers can rely on positional correspondence.
+    """
+    for img in entry.get("images") or []:
+        url = img.get("url")
+        if url:
+            yield url
+
+    quoted = entry.get("quoted_post") or {}
+    for img in quoted.get("images") or []:
+        url = img.get("url")
+        if url:
+            yield url
+
+    for reply in entry.get("thread_replies") or []:
+        for img in reply.get("images") or []:
+            url = img.get("url")
+            if url:
+                yield url
+
+    for reply in quoted.get("thread_replies") or []:
+        for img in reply.get("images") or []:
+            url = img.get("url")
+            if url:
+                yield url
+
 
 DEFAULT_USER_AGENT = (
     "bsky-saves/0.1 (+https://github.com/tenorune/bsky-saves)"
