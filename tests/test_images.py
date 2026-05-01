@@ -1,6 +1,9 @@
 """Tests for bsky_saves.images."""
 from __future__ import annotations
 
+import pytest
+
+from bsky_saves.cli import _load_uris
 from bsky_saves.images import _iter_image_urls
 
 
@@ -79,3 +82,44 @@ def test_iter_image_urls_skips_empty_url(fixture_factory):
     f = fixture_factory
     entry = f.entry("at://x/p/1", images=[{"kind": "image", "url": "", "alt": ""}])
     assert list(_iter_image_urls(entry)) == []
+
+
+def test_load_uris_none_returns_none():
+    assert _load_uris(None) is None
+
+
+def test_load_uris_simple_list(tmp_path):
+    p = tmp_path / "uris.txt"
+    p.write_text("at://x/p/1\nat://x/p/2\n", encoding="utf-8")
+    assert _load_uris(p) == {"at://x/p/1", "at://x/p/2"}
+
+
+def test_load_uris_strips_comments_and_blanks(tmp_path):
+    p = tmp_path / "uris.txt"
+    p.write_text(
+        "# this is a comment\n"
+        "\n"
+        "at://x/p/1\n"
+        "  \n"
+        "# another comment\n"
+        "at://x/p/2  \n",
+        encoding="utf-8",
+    )
+    assert _load_uris(p) == {"at://x/p/1", "at://x/p/2"}
+
+
+def test_load_uris_dedupes(tmp_path):
+    p = tmp_path / "uris.txt"
+    p.write_text("at://x/p/1\nat://x/p/1\nat://x/p/2\n", encoding="utf-8")
+    assert _load_uris(p) == {"at://x/p/1", "at://x/p/2"}
+
+
+def test_load_uris_empty_file(tmp_path):
+    p = tmp_path / "uris.txt"
+    p.write_text("", encoding="utf-8")
+    assert _load_uris(p) == set()
+
+
+def test_load_uris_missing_file_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        _load_uris(tmp_path / "does-not-exist.txt")

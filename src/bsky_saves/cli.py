@@ -21,6 +21,23 @@ import sys
 from pathlib import Path
 
 
+def _load_uris(path: Path | None) -> set[str] | None:
+    """Load a newline-delimited URI list. Returns None if path is None.
+
+    Strips blank lines and `#`-prefixed comments; trims surrounding whitespace
+    on each URI; deduplicates.
+    """
+    if path is None:
+        return None
+    out: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            continue
+        out.add(s)
+    return out
+
+
 def _add_inventory_arg(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--inventory",
