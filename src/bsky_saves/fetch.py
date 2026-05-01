@@ -66,6 +66,10 @@ DEFAULT_APPVIEW_DID_CANDIDATES = [
 ]
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 class NoBookmarkEndpointError(Exception):
     """All probed bookmark endpoints failed."""
 
@@ -242,19 +246,20 @@ def fetch_to_inventory(
 
     new_entries = [normalise_record(r) for r in raw]
 
-    if inventory_path.exists():
-        existing = json.loads(inventory_path.read_text(encoding="utf-8"))
-    else:
+    first_run = not inventory_path.exists()
+    if first_run:
         existing = {"fetched_at": None, "saves": []}
+    else:
+        existing = json.loads(inventory_path.read_text(encoding="utf-8"))
     merged = merge_into_inventory(existing, new_entries)
 
-    merged["fetched_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    inventory_path.parent.mkdir(parents=True, exist_ok=True)
-    inventory_path.write_text(
-        json.dumps(merged, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    if first_run or merged["saves"] != existing["saves"]:
+        merged["fetched_at"] = _now_iso()
+        inventory_path.parent.mkdir(parents=True, exist_ok=True)
+        inventory_path.write_text(
+            json.dumps(merged, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
     print(
         f"bsky-saves: inventory now has {len(merged['saves'])} total entries",
         file=sys.stderr,

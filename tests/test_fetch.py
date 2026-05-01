@@ -138,3 +138,161 @@ def test_pagination_collects_all_pages():
     )
     uris = [r["uri"] for r in records]
     assert uris == ["at://x/1", "at://x/2"]
+
+
+# --- fetch_to_inventory write-on-change tests ---
+
+import json
+from pathlib import Path
+
+from bsky_saves import fetch as _fetch_mod
+
+
+def _mock_create_session(handle="user.bsky.social", did="did:plc:abc"):
+    respx.post(f"{PDS_BASE}/xrpc/com.atproto.server.createSession").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "accessJwt": "fake-access",
+                "refreshJwt": "fake-refresh",
+                "did": did,
+                "handle": handle,
+            },
+        )
+    )
+
+
+def _bookmark_record(uri: str, saved_at: str = "2026-04-12T18:31:00Z") -> dict:
+    """Match the hydrated app.bsky.bookmark.getBookmarks shape that
+    normalise_record consumes."""
+    return {
+        "subject": {"uri": uri},
+        "createdAt": saved_at,
+        "item": {
+            "uri": uri,
+            "indexedAt": saved_at,
+            "record": {"text": "post body"},
+            "author": {
+                "handle": "x.bsky.social",
+                "displayName": "X",
+                "did": "did:plc:x",
+            },
+        },
+    }
+
+
+@respx.mock
+def test_fetch_to_inventory_no_write_when_no_new_saves(tmp_path, monkeypatch):
+    """Second fetch with the same bookmarks must leave the inventory file
+    untouched (no fetched_at bump, no rewrite). Two distinct timestamps
+    from monkeypatched _now_iso make a coincidental same-second pass impossible."""
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200, json={"bookmarks": [_bookmark_record("at://x/p/1")]}
+        )
+    )
+
+    inv_path = tmp_path / "inv.json"
+
+    timestamps = iter(["2026-04-12T00:00:00Z", "2026-04-12T01:00:00Z"])
+    monkeypatch.setattr(_fetch_mod, "_now_iso", lambda: next(timestamps))
+
+    _fetch_mod.fetch_to_inventory(
+        inv_path,
+        handle="user.bsky.social",
+        app_password="app-password",
+        pds_base=PDS_BASE,
+        appview_base=APPVIEW_BASE,
+    )
+    first = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert first["fetched_at"] == "2026-04-12T00:00:00Z"
+
+    _fetch_mod.fetch_to_inventory(
+        inv_path,
+        handle="user.bsky.social",
+        app_password="app-password",
+        pds_base=PDS_BASE,
+        appview_base=APPVIEW_BASE,
+    )
+    second = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert second["fetched_at"] == "2026-04-12T00:00:00Z", (
+        "second fetch with no new bookmarks must not bump fetched_at"
+    )
+
+
+@respx.mock
+def test_fetch_to_inventory_writes_when_new_saves(tmp_path):
+    """A fetch that returns new saves must rewrite the inventory."""
+    _mock_create_session()
+
+    inv_path = tmp_path / "inv.json"
+
+    # First run: one bookmark.
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200, json={"bookmarks": [_bookmark_record("at://x/p/1")]}
+        )
+    )
+    _fetch_mod.fetch_to_inventory(
+        inv_path,
+        handle="user.bsky.social",
+        app_password="app-password",
+        pds_base=PDS_BASE,
+        appview_base=APPVIEW_BASE,
+    )
+    first_content = inv_path.read_text(encoding="utf-8")
+    first = json.loads(first_content)
+    assert len(first["saves"]) == 1
+
+    # Second run: a new bookmark.
+    respx.reset()
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "bookmarks": [
+                    _bookmark_record("at://x/p/1"),
+                    _bookmark_record("at://x/p/2", saved_at="2026-04-13T00:00:00Z"),
+                ]
+            },
+        )
+    )
+    _fetch_mod.fetch_to_inventory(
+        inv_path,
+        handle="user.bsky.social",
+        app_password="app-password",
+        pds_base=PDS_BASE,
+        appview_base=APPVIEW_BASE,
+    )
+    second_content = inv_path.read_text(encoding="utf-8")
+    second = json.loads(second_content)
+    assert len(second["saves"]) == 2
+    assert second_content != first_content
+
+
+@respx.mock
+def test_fetch_to_inventory_creates_file_on_first_run_with_zero_records(tmp_path):
+    """First run with zero bookmarks still creates the inventory file."""
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(200, json={"bookmarks": []})
+    )
+    respx.get(f"{PDS_BASE}/xrpc/com.atproto.repo.describeRepo").mock(
+        return_value=httpx.Response(200, json={"collections": []})
+    )
+
+    inv_path = tmp_path / "inv.json"
+    _fetch_mod.fetch_to_inventory(
+        inv_path,
+        handle="user.bsky.social",
+        app_password="app-password",
+        pds_base=PDS_BASE,
+        appview_base=APPVIEW_BASE,
+    )
+
+    assert inv_path.exists()
+    data = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert data["saves"] == []
+    assert data["fetched_at"] is not None
