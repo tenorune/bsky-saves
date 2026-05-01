@@ -290,3 +290,54 @@ def test_hydrate_images_empty_uris_processes_nothing(fixture_factory, tmp_path):
     entries_processed, downloaded, _, _ = result
     assert (entries_processed, downloaded) == (0, 0)
     assert not route.called
+
+
+@respx.mock
+def test_hydrate_images_skips_existing_file(fixture_factory, tmp_path):
+    """If <out>/<filename> already exists, no download; mapping still recorded."""
+    f = fixture_factory
+    url = "https://cdn.bsky.app/a.jpg"
+    inv = f.inventory(f.entry("at://x/p/1", images=[f.image(url)]))
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+    out_dir.mkdir()
+    fname = filename_for_url(url)
+    (out_dir / fname).write_bytes(b"PRE-EXISTING")
+
+    route = respx.get(url).respond(200, content=b"NEW")
+
+    result = hydrate_images(inv_path, out_dir)
+    entries_processed, downloaded, skipped, failed = result
+    assert (entries_processed, downloaded, skipped, failed) == (1, 0, 1, 0)
+    assert not route.called
+    assert (out_dir / fname).read_bytes() == b"PRE-EXISTING"
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert written["saves"][0]["local_images"] == [{"url": url, "path": fname}]
+
+
+@respx.mock
+def test_hydrate_images_idempotent_across_runs(fixture_factory, tmp_path):
+    """Run twice: second run is a no-op for downloads; local_images stays the same."""
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+
+    first = hydrate_images(inv_path, out_dir)
+    second = hydrate_images(inv_path, out_dir)
+
+    assert first == (1, 1, 0, 0)
+    assert second == (1, 0, 1, 0)
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    fname = filename_for_url("https://cdn.bsky.app/a.jpg")
+    assert written["saves"][0]["local_images"] == [
+        {"url": "https://cdn.bsky.app/a.jpg", "path": fname},
+    ]
