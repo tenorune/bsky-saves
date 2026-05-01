@@ -2,7 +2,7 @@
 
 A toolkit for ingesting your own BlueSky bookmarks ("saves") into a portable
 JSON inventory, with optional hydration of linked article text, self-thread
-context, and image localization.
+context, and CDN image downloads.
 
 ## Why
 
@@ -50,9 +50,10 @@ bsky-saves hydrate threads --inventory ./saves_inventory.json
 # Decode each save's post-creation timestamp from its rkey (offline).
 bsky-saves enrich --inventory ./saves_inventory.json
 
-# Localize cdn.bsky.app image references in any Markdown files under
-# ./content/ into ./assets/<slug>/, rewriting the references in place.
-bsky-saves hydrate images --stories ./content --assets ./assets
+# Download cdn.bsky.app images referenced by the inventory into ./images/
+# (flat layout). Records url→path mappings as `local_images` on each entry.
+# Use --uris FILE (newline-delimited at:// URIs) to limit to a subset.
+bsky-saves hydrate images --inventory ./saves_inventory.json --out ./images
 ```
 
 All commands are **idempotent**: running them again skips already-hydrated
@@ -92,7 +93,12 @@ entries and adds only what's new. Failures are recorded inline (e.g.
         { "uri": "...", "indexedAt": "...", "text": "...", "images": [...] }
       ],
       "thread_schema_version": 3,
-      "thread_fetched_at": "..."
+      "thread_fetched_at": "...",
+
+      // Added by `hydrate images`:
+      "local_images": [
+        { "url": "https://cdn.bsky.app/...", "path": "img-9f2c8e1b....jpg" }
+      ]
     }
   ]
 }
@@ -100,7 +106,7 @@ entries and adds only what's new. Failures are recorded inline (e.g.
 
 ## What about OAuth?
 
-`bsky-saves` 0.1.x only supports the app-password authentication path. The
+`bsky-saves` only supports the app-password authentication path. The
 OAuth + DPoP machinery for third-party PDSes lives in a separate package,
 [`atproto-oauth-py`], and exists primarily for AppView-targeted resource calls
 that aren't reachable via PDS-direct auth. For BlueSky bookmarks the
