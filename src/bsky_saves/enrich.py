@@ -33,18 +33,27 @@ def parse_iso(s):
 
 
 def enrich_inventory(inventory_path: Path, *, refresh: bool = False) -> dict:
-    """Enrich the inventory file in place. Returns a stats dict."""
+    """Enrich the inventory file in place. Returns a stats dict.
+
+    Skips the file write entirely when no entry was actually mutated, so a
+    re-run on an already-enriched, already-clean inventory is a true no-op
+    on disk.
+    """
     inv = json.loads(inventory_path.read_text(encoding="utf-8"))
     saves = inv["saves"]
     added = 0
     skipped = 0
     failed = 0
     pub_dropped = 0
+    changed = False
 
     for s in saves:
         if not s.get("post_created_at") or refresh:
             try:
-                s["post_created_at"] = decode_tid_to_iso(rkey_of(s["uri"]))
+                new_val = decode_tid_to_iso(rkey_of(s["uri"]))
+                if s.get("post_created_at") != new_val:
+                    s["post_created_at"] = new_val
+                    changed = True
                 added += 1
             except Exception as e:
                 print(f"  failed: {s.get('uri')!r}: {e}", file=sys.stderr)
@@ -69,11 +78,13 @@ def enrich_inventory(inventory_path: Path, *, refresh: bool = False) -> dict:
         if bogus:
             s.pop("article_published_at", None)
             pub_dropped += 1
+            changed = True
 
-    inventory_path.write_text(
-        json.dumps(inv, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    if changed:
+        inventory_path.write_text(
+            json.dumps(inv, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
 
     stats = {
         "added": added,
