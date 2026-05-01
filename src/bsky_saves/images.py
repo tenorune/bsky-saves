@@ -59,7 +59,7 @@ def _iter_image_urls(entry: dict) -> Iterator[str]:
 
 
 DEFAULT_USER_AGENT = (
-    "bsky-saves/0.1 (+https://github.com/tenorune/bsky-saves)"
+    "bsky-saves/0.2 (+https://github.com/tenorune/bsky-saves)"
 )
 TIMEOUT = 30.0
 
