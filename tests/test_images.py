@@ -341,3 +341,59 @@ def test_hydrate_images_idempotent_across_runs(fixture_factory, tmp_path):
     assert written["saves"][0]["local_images"] == [
         {"url": "https://cdn.bsky.app/a.jpg", "path": fname},
     ]
+
+
+@respx.mock
+def test_hydrate_images_per_image_failure_nonfatal(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry(
+            "at://x/p/1",
+            images=[
+                f.image("https://cdn.bsky.app/ok.jpg"),
+                f.image("https://cdn.bsky.app/bad.jpg"),
+                f.image("https://cdn.bsky.app/also-ok.jpg"),
+            ],
+        )
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    respx.get("https://cdn.bsky.app/ok.jpg").respond(200, content=b"O")
+    respx.get("https://cdn.bsky.app/bad.jpg").respond(500)
+    respx.get("https://cdn.bsky.app/also-ok.jpg").respond(200, content=b"A")
+
+    result = hydrate_images(inv_path, out_dir)
+    entries_processed, downloaded, skipped, failed = result
+    assert (entries_processed, downloaded, skipped, failed) == (1, 2, 0, 1)
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    paths = [li["url"] for li in written["saves"][0]["local_images"]]
+    assert paths == [
+        "https://cdn.bsky.app/ok.jpg",
+        "https://cdn.bsky.app/also-ok.jpg",
+    ]
+
+
+@respx.mock
+def test_hydrate_images_failure_in_one_entry_does_not_block_others(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/bad.jpg")]),
+        f.entry("at://x/p/2", images=[f.image("https://cdn.bsky.app/ok.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    respx.get("https://cdn.bsky.app/bad.jpg").respond(500)
+    respx.get("https://cdn.bsky.app/ok.jpg").respond(200, content=b"OK")
+
+    result = hydrate_images(inv_path, tmp_path / "imgs")
+    entries_processed, downloaded, _, failed = result
+    assert (entries_processed, downloaded, failed) == (2, 1, 1)
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    by_uri = {s["uri"]: s for s in written["saves"]}
+    assert "local_images" not in by_uri["at://x/p/1"]
+    assert "local_images" in by_uri["at://x/p/2"]
