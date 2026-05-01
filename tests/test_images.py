@@ -1,10 +1,13 @@
 """Tests for bsky_saves.images."""
 from __future__ import annotations
 
+import json
+
 import pytest
+import respx
 
 from bsky_saves.cli import _load_uris
-from bsky_saves.images import _iter_image_urls
+from bsky_saves.images import _iter_image_urls, hydrate_images, filename_for_url
 
 
 def test_iter_image_urls_post_images_only(fixture_factory):
@@ -123,3 +126,100 @@ def test_load_uris_empty_file(tmp_path):
 def test_load_uris_missing_file_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         _load_uris(tmp_path / "does-not-exist.txt")
+
+
+@respx.mock
+def test_hydrate_images_downloads_all_entries(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+        f.entry("at://x/p/2", images=[f.image("https://cdn.bsky.app/b.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"AAA")
+    respx.get("https://cdn.bsky.app/b.jpg").respond(200, content=b"BBB")
+
+    result = hydrate_images(inv_path, out_dir)
+    entries_processed, downloaded, skipped, failed = result
+    assert (entries_processed, downloaded, skipped, failed) == (2, 2, 0, 0)
+
+    fname_a = filename_for_url("https://cdn.bsky.app/a.jpg")
+    fname_b = filename_for_url("https://cdn.bsky.app/b.jpg")
+    assert (out_dir / fname_a).read_bytes() == b"AAA"
+    assert (out_dir / fname_b).read_bytes() == b"BBB"
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    saves_by_uri = {s["uri"]: s for s in written["saves"]}
+    assert saves_by_uri["at://x/p/1"]["local_images"] == [
+        {"url": "https://cdn.bsky.app/a.jpg", "path": fname_a},
+    ]
+    assert saves_by_uri["at://x/p/2"]["local_images"] == [
+        {"url": "https://cdn.bsky.app/b.jpg", "path": fname_b},
+    ]
+
+
+@respx.mock
+def test_hydrate_images_no_images_no_local_images_field(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(f.entry("at://x/p/1"))  # no images
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    result = hydrate_images(inv_path, out_dir)
+    assert result == (0, 0, 0, 0)
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert "local_images" not in written["saves"][0]
+
+
+@respx.mock
+def test_hydrate_images_dedupes_urls_across_locations(fixture_factory, tmp_path):
+    """Same URL appearing in post + thread reply downloads once, recorded once."""
+    f = fixture_factory
+    same_url = "https://cdn.bsky.app/dup.jpg"
+    inv = f.inventory(
+        f.entry(
+            "at://x/p/1",
+            images=[f.image(same_url)],
+            thread_reply_images=[[f.image(same_url)]],
+        )
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    route = respx.get(same_url).respond(200, content=b"X")
+
+    result = hydrate_images(inv_path, out_dir)
+    entries_processed, downloaded, skipped, failed = result
+    assert (entries_processed, downloaded, skipped, failed) == (1, 1, 0, 0)
+    assert route.call_count == 1
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    fname = filename_for_url(same_url)
+    assert written["saves"][0]["local_images"] == [{"url": same_url, "path": fname}]
+
+
+@respx.mock
+def test_hydrate_images_preserves_existing_fields(fixture_factory, tmp_path):
+    """Other entry fields (article_text, thread_replies, etc.) must be preserved."""
+    f = fixture_factory
+    entry = f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")])
+    entry["article_text"] = "The full article body."
+    entry["post_created_at"] = "2026-04-10T15:22:08Z"
+    inv = f.inventory(entry)
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+    hydrate_images(inv_path, tmp_path / "imgs")
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    s = written["saves"][0]
+    assert s["article_text"] == "The full article body."
+    assert s["post_created_at"] == "2026-04-10T15:22:08Z"
+    assert "local_images" in s
