@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 from datetime import datetime, timezone
@@ -239,10 +240,12 @@ def hydrate_images(
             entry["local_images"] = local_images
 
     inv["fetched_at"] = _now_iso()
-    inventory_path.write_text(
+    tmp_path = inventory_path.with_suffix(inventory_path.suffix + ".tmp")
+    tmp_path.write_text(
         json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
+    os.rename(tmp_path, inventory_path)
 
     print(
         f"bsky-saves: processed {entries_processed} entries, "

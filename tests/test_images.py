@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 import respx
@@ -397,3 +398,36 @@ def test_hydrate_images_failure_in_one_entry_does_not_block_others(fixture_facto
     by_uri = {s["uri"]: s for s in written["saves"]}
     assert "local_images" not in by_uri["at://x/p/1"]
     assert "local_images" in by_uri["at://x/p/2"]
+
+
+@respx.mock
+def test_hydrate_images_atomic_write_via_tmp_file(
+    fixture_factory, tmp_path, monkeypatch
+):
+    """Patch os.rename to capture that the write went through a temp file."""
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+
+    rename_calls: list[tuple[str, str]] = []
+    real_rename = os.rename
+
+    def spy_rename(src, dst):
+        rename_calls.append((str(src), str(dst)))
+        real_rename(src, dst)
+
+    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+
+    hydrate_images(inv_path, tmp_path / "imgs")
+
+    assert len(rename_calls) == 1
+    src, dst = rename_calls[0]
+    assert dst == str(inv_path)
+    assert src.endswith(".tmp")
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert "local_images" in written["saves"][0]
