@@ -499,3 +499,101 @@ def test_cli_hydrate_images_old_flags_rejected(tmp_path):
             "--stories", str(tmp_path),
             "--assets", str(tmp_path),
         ])
+
+
+@respx.mock
+def test_hydrate_images_no_write_when_nothing_changed(
+    fixture_factory, tmp_path, monkeypatch
+):
+    """Second idempotent run rebuilds identical local_images and must NOT
+    rewrite the inventory file."""
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+
+    rename_calls: list[tuple[str, str]] = []
+    real_rename = os.rename
+
+    def spy_rename(src, dst):
+        rename_calls.append((str(src), str(dst)))
+        real_rename(src, dst)
+
+    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+
+    hydrate_images(inv_path, out_dir)
+    first_run_renames = len(rename_calls)
+    assert first_run_renames == 1  # first run wrote the inventory
+
+    rename_calls.clear()
+    hydrate_images(inv_path, out_dir)
+    assert rename_calls == [], (
+        "second idempotent run must not rewrite the inventory"
+    )
+
+
+@respx.mock
+def test_hydrate_images_no_write_when_no_entries_have_images(
+    fixture_factory, tmp_path, monkeypatch
+):
+    """Inventory with no image-bearing entries: no write, no fetched_at update."""
+    f = fixture_factory
+    inv = f.inventory(f.entry("at://x/p/1"))  # no images
+    inv_path = tmp_path / "inv.json"
+    original_text = json.dumps(inv)
+    inv_path.write_text(original_text, encoding="utf-8")
+
+    rename_calls: list[tuple[str, str]] = []
+    real_rename = os.rename
+
+    def spy_rename(src, dst):
+        rename_calls.append((str(src), str(dst)))
+        real_rename(src, dst)
+
+    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+
+    hydrate_images(inv_path, tmp_path / "imgs")
+
+    assert rename_calls == []
+    assert inv_path.read_text(encoding="utf-8") == original_text
+
+
+@respx.mock
+def test_hydrate_images_writes_when_some_but_not_all_entries_change(
+    fixture_factory, tmp_path, monkeypatch
+):
+    """Mixed run: one entry already hydrated, one new. Should write once."""
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+        f.entry("at://x/p/2", images=[f.image("https://cdn.bsky.app/b.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+    respx.get("https://cdn.bsky.app/b.jpg").respond(200, content=b"B")
+
+    rename_calls: list[tuple[str, str]] = []
+    real_rename = os.rename
+
+    def spy_rename(src, dst):
+        rename_calls.append((str(src), str(dst)))
+        real_rename(src, dst)
+
+    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+
+    # Pre-hydrate p/1 only.
+    hydrate_images(inv_path, out_dir, uris={"at://x/p/1"})
+    assert len(rename_calls) == 1
+    rename_calls.clear()
+
+    # Now run for everything: p/1 is unchanged, p/2 should be downloaded.
+    hydrate_images(inv_path, out_dir)
+    assert len(rename_calls) == 1, "mixed run must write exactly once"

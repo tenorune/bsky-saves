@@ -123,6 +123,7 @@ def hydrate_images(
     downloaded = 0
     skipped = 0
     failed = 0
+    changed = False
 
     for entry in inv.get("saves", []):
         if uris is not None and entry.get("uri") not in uris:
@@ -149,16 +150,18 @@ def hydrate_images(
                     )
                     continue
             local_images.append({"url": url, "path": fname})
-        if local_images:
+        if local_images and entry.get("local_images") != local_images:
             entry["local_images"] = local_images
+            changed = True
 
-    inv["fetched_at"] = _now_iso()
-    tmp_path = inventory_path.with_suffix(inventory_path.suffix + ".tmp")
-    tmp_path.write_text(
-        json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    os.rename(tmp_path, inventory_path)
+    if changed:
+        inv["fetched_at"] = _now_iso()
+        tmp_path = inventory_path.with_suffix(inventory_path.suffix + ".tmp")
+        tmp_path.write_text(
+            json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        os.rename(tmp_path, inventory_path)
 
     print(
         f"bsky-saves: processed {entries_processed} entries, "
