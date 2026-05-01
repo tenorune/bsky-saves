@@ -7,7 +7,7 @@ Subcommands:
 
   bsky-saves hydrate articles --inventory PATH [--refresh-dates]
   bsky-saves hydrate threads  --inventory PATH
-  bsky-saves hydrate images   --stories DIR --assets DIR [--assets-url-prefix /assets/stories]
+  bsky-saves hydrate images   --inventory PATH --out DIR [--uris FILE]
       Idempotent hydration of articles, threads, and image localization.
 
   bsky-saves enrich --inventory PATH [--refresh]
@@ -83,23 +83,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Public AppView base URL (default: https://public.api.bsky.app).",
     )
 
-    p_images = hsub.add_parser("images", help="Localize cdn.bsky.app image refs in Markdown files.")
+    p_images = hsub.add_parser("images", help="Download CDN images referenced in the inventory.")
+    _add_inventory_arg(p_images)
     p_images.add_argument(
-        "--stories",
+        "--out",
         type=Path,
         required=True,
-        help="Directory of Markdown files to scan.",
+        help="Directory to download images into (flat layout; created if absent).",
     )
     p_images.add_argument(
-        "--assets",
+        "--uris",
         type=Path,
-        required=True,
-        help="Directory to download images into (under <slug>/ subdirs).",
-    )
-    p_images.add_argument(
-        "--assets-url-prefix",
-        default="/assets/stories",
-        help="Root-relative URL prefix that will replace cdn.bsky.app URLs (default: /assets/stories).",
+        default=None,
+        help="Optional newline-delimited list of at:// post URIs to limit download to. "
+             "If omitted, all inventory entries with images are processed.",
     )
 
     p_enrich = sub.add_parser("enrich", help="Decode post_created_at and clean stale dates.")
@@ -148,12 +145,12 @@ def main(argv: list[str] | None = None) -> int:
             hydrate_threads(args.inventory, appview=args.appview)
             return 0
         if args.hydrate_what == "images":
-            from .images import localize_images
+            from .images import hydrate_images
 
-            localize_images(
-                args.stories,
-                args.assets,
-                assets_url_prefix=args.assets_url_prefix,
+            hydrate_images(
+                args.inventory,
+                args.out,
+                uris=_load_uris(args.uris),
             )
             return 0
 

@@ -431,3 +431,71 @@ def test_hydrate_images_atomic_write_via_tmp_file(
     assert src.endswith(".tmp")
     written = json.loads(inv_path.read_text(encoding="utf-8"))
     assert "local_images" in written["saves"][0]
+
+
+from bsky_saves.cli import main as cli_main
+
+
+@respx.mock
+def test_cli_hydrate_images_basic_flow(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+        f.entry("at://x/p/2", images=[f.image("https://cdn.bsky.app/b.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+    respx.get("https://cdn.bsky.app/b.jpg").respond(200, content=b"B")
+
+    rc = cli_main([
+        "hydrate", "images",
+        "--inventory", str(inv_path),
+        "--out", str(out_dir),
+    ])
+    assert rc == 0
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert all("local_images" in s for s in written["saves"])
+
+
+@respx.mock
+def test_cli_hydrate_images_with_uris_file(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+        f.entry("at://x/p/2", images=[f.image("https://cdn.bsky.app/b.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    uris_path = tmp_path / "uris.txt"
+    uris_path.write_text("at://x/p/1\n", encoding="utf-8")
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+    route_b = respx.get("https://cdn.bsky.app/b.jpg").respond(200, content=b"B")
+
+    rc = cli_main([
+        "hydrate", "images",
+        "--inventory", str(inv_path),
+        "--out", str(tmp_path / "imgs"),
+        "--uris", str(uris_path),
+    ])
+    assert rc == 0
+    assert not route_b.called
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    by_uri = {s["uri"]: s for s in written["saves"]}
+    assert "local_images" in by_uri["at://x/p/1"]
+    assert "local_images" not in by_uri["at://x/p/2"]
+
+
+def test_cli_hydrate_images_old_flags_rejected(tmp_path):
+    """v0.1 --stories / --assets / --assets-url-prefix are gone."""
+    with pytest.raises(SystemExit):
+        cli_main([
+            "hydrate", "images",
+            "--stories", str(tmp_path),
+            "--assets", str(tmp_path),
+        ])
