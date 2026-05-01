@@ -223,3 +223,70 @@ def test_hydrate_images_preserves_existing_fields(fixture_factory, tmp_path):
     assert s["article_text"] == "The full article body."
     assert s["post_created_at"] == "2026-04-10T15:22:08Z"
     assert "local_images" in s
+
+
+@respx.mock
+def test_hydrate_images_uris_filter_processes_only_listed(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+        f.entry("at://x/p/2", images=[f.image("https://cdn.bsky.app/b.jpg")]),
+        f.entry("at://x/p/3", images=[f.image("https://cdn.bsky.app/c.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    out_dir = tmp_path / "imgs"
+
+    route_a = respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+    route_b = respx.get("https://cdn.bsky.app/b.jpg").respond(200, content=b"B")
+    route_c = respx.get("https://cdn.bsky.app/c.jpg").respond(200, content=b"C")
+
+    result = hydrate_images(inv_path, out_dir, uris={"at://x/p/1", "at://x/p/3"})
+    entries_processed, downloaded, _, _ = result
+    assert (entries_processed, downloaded) == (2, 2)
+    assert route_a.called
+    assert not route_b.called
+    assert route_c.called
+
+    written = json.loads(inv_path.read_text(encoding="utf-8"))
+    by_uri = {s["uri"]: s for s in written["saves"]}
+    assert "local_images" in by_uri["at://x/p/1"]
+    assert "local_images" not in by_uri["at://x/p/2"]
+    assert "local_images" in by_uri["at://x/p/3"]
+
+
+@respx.mock
+def test_hydrate_images_uris_unknown_uri_silently_skipped(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+
+    result = hydrate_images(
+        inv_path,
+        tmp_path / "imgs",
+        uris={"at://x/p/1", "at://x/never-existed"},
+    )
+    entries_processed, downloaded, _, failed = result
+    assert (entries_processed, downloaded, failed) == (1, 1, 0)
+
+
+@respx.mock
+def test_hydrate_images_empty_uris_processes_nothing(fixture_factory, tmp_path):
+    f = fixture_factory
+    inv = f.inventory(
+        f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    route = respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
+
+    result = hydrate_images(inv_path, tmp_path / "imgs", uris=set())
+    entries_processed, downloaded, _, _ = result
+    assert (entries_processed, downloaded) == (0, 0)
+    assert not route.called
