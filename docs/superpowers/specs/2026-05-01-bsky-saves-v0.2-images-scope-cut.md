@@ -193,7 +193,7 @@ Bump `version = "0.2.0"`.
 
 ### 5.5 `README.md`
 
-Update the `hydrate images` section to reflect the new CLI. Note the breaking change in a "Migrating from 0.1" section (or top-of-readme banner) pointing to this spec.
+Update the `hydrate images` section to reflect the new CLI. No migration notice or deprecation banner.
 
 ## 6. Migration plan for stories-of-47
 
