@@ -70,6 +70,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _stderr_is_tty() -> bool:
+    return sys.stderr.isatty()
+
+
 class NoBookmarkEndpointError(Exception):
     """All probed bookmark endpoints failed."""
 
@@ -136,6 +140,12 @@ def probe_bookmark_endpoints(
             cursor: str | None = None
             invalid_token = False
             request_failed = False
+            endpoint_announced = False
+            progress_totals: list[int] = []
+            progress_in_place_active = False
+
+            aud_tag = "" if host == "pds" else f" aud={candidate_aud}"
+            endpoint_label = f"bsky-saves:   {host}:{method}{aud_tag}"
 
             while True:
                 params = params_factory(cursor, did)
@@ -145,38 +155,71 @@ def probe_bookmark_endpoints(
                     headers=headers,
                     timeout=30.0,
                 )
-                aud_tag = "" if host == "pds" else f" aud={candidate_aud}"
-                status_msg = f"bsky-saves:   {host}:{method}{aud_tag} -> {r.status_code}"
                 body: object = None
-                if r.status_code >= 400:
+                is_error = r.status_code >= 400
+                if is_error:
                     try:
                         body = r.json()
                     except ValueError:
                         body = {"raw": r.text[:500]}
-                    status_msg += f"  body={body}"
-                print(status_msg, file=sys.stderr)
 
-                if (
-                    host != "pds"
-                    and r.status_code == 400
-                    and isinstance(body, dict)
-                    and body.get("error") == "InvalidToken"
-                ):
-                    invalid_token = True
-                    break
+                    if progress_in_place_active:
+                        sys.stderr.write("\n")
+                        sys.stderr.flush()
+                        progress_in_place_active = False
+                    print(
+                        f"{endpoint_label} -> {r.status_code}  body={body}",
+                        file=sys.stderr,
+                    )
 
-                if r.status_code in ENDPOINT_FAILURE_CODES:
-                    tried.append(f"{host}:{method}{aud_tag} -> {r.status_code}")
-                    request_failed = True
-                    break
+                    if (
+                        host != "pds"
+                        and r.status_code == 400
+                        and isinstance(body, dict)
+                        and body.get("error") == "InvalidToken"
+                    ):
+                        invalid_token = True
+                        break
+
+                    if r.status_code in ENDPOINT_FAILURE_CODES:
+                        tried.append(f"{host}:{method}{aud_tag} -> {r.status_code}")
+                        request_failed = True
+                        break
 
                 r.raise_for_status()
                 data = r.json()
                 page = _records_from_response(data)
                 records.extend(page)
+
+                if not endpoint_announced:
+                    print(
+                        f"{endpoint_label} -> {r.status_code}",
+                        file=sys.stderr,
+                    )
+                    endpoint_announced = True
+
+                progress_totals.append(len(records))
+                if _stderr_is_tty():
+                    line = "bsky-saves: progress: " + ", ".join(
+                        str(n) for n in progress_totals
+                    )
+                    sys.stderr.write("\r" + line)
+                    sys.stderr.flush()
+                    progress_in_place_active = True
+                else:
+                    print(
+                        f"bsky-saves: progress: {len(records)}",
+                        file=sys.stderr,
+                    )
+
                 cursor = data.get("cursor")
                 if not cursor or not page:
                     break
+
+            if progress_in_place_active:
+                sys.stderr.write("\n")
+                sys.stderr.flush()
+                progress_in_place_active = False
 
             if invalid_token:
                 continue

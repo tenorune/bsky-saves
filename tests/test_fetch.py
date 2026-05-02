@@ -296,3 +296,154 @@ def test_fetch_to_inventory_creates_file_on_first_run_with_zero_records(tmp_path
     data = json.loads(inv_path.read_text(encoding="utf-8"))
     assert data["saves"] == []
     assert data["fetched_at"] is not None
+
+
+# --- Progress output format tests ---
+
+import sys
+
+
+@respx.mock
+def test_progress_non_tty_emits_one_line_per_page(capsys, monkeypatch):
+    """Non-TTY (CI/pipe) mode emits one `progress: N` line per page,
+    plus a single endpoint announcement line."""
+    monkeypatch.setattr("bsky_saves.fetch._stderr_is_tty", lambda: False)
+
+    session = _mock_session()
+    _mock_service_auth_ok()
+    respx.get(f"{APPVIEW_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "bookmarks": [{"uri": f"at://x/p/{i}", "indexedAt": "2026-04-12T00:00:00Z"} for i in range(100)],
+                    "cursor": "p2",
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "bookmarks": [{"uri": f"at://x/p/{i}", "indexedAt": "2026-04-12T00:00:00Z"} for i in range(100, 178)],
+                },
+            ),
+        ]
+    )
+
+    fetch.probe_bookmark_endpoints(
+        session, pds_base=PDS_BASE, appview_base=APPVIEW_BASE
+    )
+
+    err = capsys.readouterr().err
+    # Endpoint line announced exactly once
+    assert err.count("pds:app.bsky.bookmark.getBookmarks -> 200") == 1
+    # Per-page progress lines
+    assert "bsky-saves: progress: 100\n" in err
+    assert "bsky-saves: progress: 178\n" in err
+
+
+@respx.mock
+def test_progress_tty_uses_in_place_carriage_return(capsys, monkeypatch):
+    """TTY mode rewrites a single line with growing comma-separated totals."""
+    monkeypatch.setattr("bsky_saves.fetch._stderr_is_tty", lambda: True)
+
+    session = _mock_session()
+    _mock_service_auth_ok()
+    respx.get(f"{APPVIEW_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "bookmarks": [{"uri": f"at://x/p/{i}", "indexedAt": "2026-04-12T00:00:00Z"} for i in range(100)],
+                    "cursor": "p2",
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "bookmarks": [{"uri": f"at://x/p/{i}", "indexedAt": "2026-04-12T00:00:00Z"} for i in range(100, 178)],
+                },
+            ),
+        ]
+    )
+
+    fetch.probe_bookmark_endpoints(
+        session, pds_base=PDS_BASE, appview_base=APPVIEW_BASE
+    )
+
+    err = capsys.readouterr().err
+    # In-place CR-prefixed updates
+    assert "\rbsky-saves: progress: 100" in err
+    assert "\rbsky-saves: progress: 100, 178" in err
+    # Should NOT see the per-page-line non-TTY format
+    assert "bsky-saves: progress: 100\n" not in err
+    assert "bsky-saves: progress: 178\n" not in err
+
+
+@respx.mock
+def test_progress_single_page_no_pagination(capsys, monkeypatch):
+    """A single-page response still emits one progress line."""
+    monkeypatch.setattr("bsky_saves.fetch._stderr_is_tty", lambda: False)
+
+    session = _mock_session()
+    _mock_service_auth_ok()
+    respx.get(f"{APPVIEW_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={"bookmarks": [{"uri": "at://x/1", "indexedAt": "2026-04-12T00:00:00Z"}]},
+        )
+    )
+
+    fetch.probe_bookmark_endpoints(
+        session, pds_base=PDS_BASE, appview_base=APPVIEW_BASE
+    )
+
+    err = capsys.readouterr().err
+    assert "pds:app.bsky.bookmark.getBookmarks -> 200" in err
+    assert "bsky-saves: progress: 1\n" in err
+
+
+@respx.mock
+def test_progress_tty_terminates_with_newline_before_error(capsys, monkeypatch):
+    """If pagination fails mid-walk in TTY mode, the in-place line is
+    terminated with a newline before the error line is printed."""
+    monkeypatch.setattr("bsky_saves.fetch._stderr_is_tty", lambda: True)
+
+    session = _mock_session()
+    _mock_service_auth_ok()
+    # PDS:bookmark.getBookmarks: page 1 succeeds, page 2 fails with 500.
+    # Then code falls through to the next endpoints, which all 404.
+    respx.get(f"{APPVIEW_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "bookmarks": [{"uri": "at://x/1", "indexedAt": "2026-04-12T00:00:00Z"}],
+                    "cursor": "p2",
+                },
+            ),
+            httpx.Response(500, json={"error": "InternalServerError"}),
+            # appview retry of same URL — 404 to fall through.
+            httpx.Response(404, json={"error": "MethodNotImplemented"}),
+        ]
+    )
+    respx.get(f"{APPVIEW_BASE}/xrpc/app.bsky.feed.getActorBookmarks").mock(
+        return_value=httpx.Response(404, json={"error": "MethodNotImplemented"})
+    )
+    respx.get(f"{PDS_BASE}/xrpc/com.atproto.repo.listRecords").mock(
+        return_value=httpx.Response(404, json={"error": "MethodNotImplemented"})
+    )
+
+    with pytest.raises(fetch.NoBookmarkEndpointError):
+        fetch.probe_bookmark_endpoints(
+            session, pds_base=PDS_BASE, appview_base=APPVIEW_BASE
+        )
+
+    err = capsys.readouterr().err
+    # In-place progress line was terminated before the error printed.
+    idx_progress = err.find("\rbsky-saves: progress: 1")
+    idx_error = err.find("-> 500")
+    assert idx_progress != -1
+    assert idx_error != -1
+    assert idx_progress < idx_error
+    # There must be a newline between them.
+    assert "\n" in err[idx_progress:idx_error]
