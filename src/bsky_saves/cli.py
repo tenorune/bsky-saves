@@ -12,6 +12,9 @@ Subcommands:
 
   bsky-saves enrich --inventory PATH [--refresh]
       Decode post_created_at from rkeys and clean bogus article_published_at.
+
+  bsky-saves serve [--port PORT] [--allow-origin ORIGIN]... [--verbose]
+      Run a local HTTP helper daemon for bsky-saves-gui (CORS bridge).
 """
 from __future__ import annotations
 
@@ -107,6 +110,31 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Recompute post_created_at even if it's already set.",
     )
 
+    p_serve = sub.add_parser(
+        "serve",
+        help="Run a local HTTP helper daemon for bsky-saves-gui.",
+    )
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=47826,
+        help="TCP port to bind on 127.0.0.1 (default: 47826).",
+    )
+    p_serve.add_argument(
+        "--allow-origin",
+        action="append",
+        default=None,
+        metavar="ORIGIN",
+        help="Origin permitted to call this daemon. Repeatable. "
+             "Explicit values fully replace the default of "
+             "https://saves.lightseed.net.",
+    )
+    p_serve.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Log each request to stderr.",
+    )
+
     return parser
 
 
@@ -159,6 +187,15 @@ def main(argv: list[str] | None = None) -> int:
 
         enrich_inventory(args.inventory, refresh=args.refresh)
         return 0
+
+    if args.cmd == "serve":
+        from .serve import run_serve
+
+        return run_serve(
+            port=args.port,
+            allow_origins=args.allow_origin or ["https://saves.lightseed.net"],
+            verbose=args.verbose,
+        )
 
     return 2
 
