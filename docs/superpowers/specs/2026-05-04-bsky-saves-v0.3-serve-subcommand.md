@@ -279,10 +279,31 @@ These are reflected in the implementation as hard constraints, not configuration
 - `--verbose` logs URLs to stderr only.
 - No credentials accepted or stored.
 
-## 10. Out of scope (deferred)
+## 10. Forward compatibility (phase 2 awareness)
+
+The consumer-side requirements doc carries a "Phase 2" section flagging a planned future endpoint, `POST /run`, that would let the GUI eliminate Pyodide entirely by routing fetch/enrich/threads/images/articles through the helper. Phase 2 is **not part of v0.3.0** and is not in our scope here; this section captures the v1 design choices we're making to keep phase 2 cheap to add later.
+
+Specifically, v1 must avoid pinning `serve` to a "two-feature helper" framing in any way that becomes awkward when a third capability is added.
+
+| Concern | v0.3.0 design choice |
+|---|---|
+| **CLI subcommand naming** | Generic: `bsky-saves serve`. Not `bsky-saves serve-images-and-articles`, not `bsky-saves helper`. The verb `serve` covers anything served over HTTP. |
+| **CLI help text** | The argparse `help=` string for the `serve` subparser is general: `"Run a local HTTP helper daemon for bsky-saves-gui."` Not "Image and article helper for the GUI." |
+| **Module name** | `src/bsky_saves/serve.py` — generic, not `image_article_helper.py`. |
+| **Function names** | `run_serve(...)` — generic. Per-endpoint handlers are named after their endpoints (`_handle_fetch_image`, `_handle_extract_article`, `_handle_ping`), so adding `_handle_run` later is mechanical. |
+| **Routing structure** | The `ROUTES` dispatch table accepts `(method, path) → handler` tuples. Adding a new endpoint in a future release means adding one entry; no structural change. |
+| **Capability advertisement** | `/ping`'s `features` array is the GUI's forward-compatible discovery mechanism. v0.3.0 advertises `["fetch-image", "extract-article"]`; a future v0.4.x or v1.0.0 will append `"run"`. The GUI feature-detects via this array, not by version comparison. |
+| **Startup-line copy** | `bsky-saves serve listening on http://127.0.0.1:47826 (origins: ...)` — describes what the daemon is, not what it does. Holds up unchanged when more endpoints exist. |
+| **Verbose log format** | Per-request logs format the request line as `<method> <path>` (e.g. `POST /fetch-image`). Adding `POST /run` later produces the same shape. |
+| **README copy** | The `serve` README section describes the daemon as "a local HTTP helper for `bsky-saves-gui`" and lists the v0.3.0 endpoints; the framing leaves room for additional endpoints in future releases. Avoid phrases like "the image and article helper" that would read oddly once `/run` exists. |
+
+**What this section is not:** a commitment to building `/run` in any particular release. The consumer doc explicitly defers it to a future "v2"; we'll re-engage when the GUI team is ready to design it. At that point bsky-saves's own design questions (credential handling in request body, binary blob serialization, response size limits, partial failure semantics) will need their own brainstorming pass.
+
+## 11. Out of scope (deferred)
 
 | Deferred | Trigger to revisit |
 |---|---|
+| `POST /run` endpoint (phase 2) | When the consumer team is ready to design v2. See §10. |
 | Authenticated endpoints (sessions, JWT, shared secrets) | If `serve` ever needs to expose anything sensitive. |
 | Streaming responses | If `/extract-article` routinely takes >15s and silence becomes a UX problem. |
 | Rate limits / concurrency caps | If anyone reports daemon abuse. |
@@ -297,7 +318,7 @@ These are reflected in the implementation as hard constraints, not configuration
 | `hydrate articles` persisting the new title field | Possibly future-useful (the shared helper now extracts it), but not in v0.3.0. The `fetch_article()` adapter discards it to preserve the v0.2 inventory contract. |
 | Any change to existing `fetch` / `enrich` / `hydrate articles|threads|images` behavior | Out of scope. v0.3.0 is purely additive. |
 
-## 11. Decisions log
+## 12. Decisions log
 
 | Date | Decision |
 |---|---|
@@ -311,3 +332,4 @@ These are reflected in the implementation as hard constraints, not configuration
 | 2026-05-04 | Test client side uses stdlib `urllib.request`; upstream mocks via `respx` (cross-thread). |
 | 2026-05-04 | No `python -m bsky_saves.serve` shortcut. |
 | 2026-05-04 | No `__main__.py`. |
+| 2026-05-04 | Phase 2 (future `POST /run`) explicitly acknowledged; v0.3.0 copy/naming/structure chosen to keep adding `/run` cheap (§10). |
