@@ -356,3 +356,52 @@ def test_extract_article_network_error_returns_502():
         )
     assert status == 502
     assert "error" in json.loads(body)
+
+
+def test_allow_origin_override_replaces_default():
+    """Custom allow_origins fully replaces the default list."""
+    custom = "https://other.example"
+    with serve_in_background(allow_origins=(custom,)) as (port, _):
+        # Default origin must NOT be allowed.
+        _, headers_default, _ = _request(
+            port, "/ping", headers={"Origin": DEFAULT_ORIGIN}
+        )
+        assert "Access-Control-Allow-Origin" not in headers_default
+
+        # Custom origin must be allowed.
+        _, headers_custom, _ = _request(
+            port, "/ping", headers={"Origin": custom}
+        )
+        assert headers_custom["Access-Control-Allow-Origin"] == custom
+
+
+def test_multiple_allow_origins_all_allowed():
+    a = "https://a.example"
+    b = "https://b.example"
+    with serve_in_background(allow_origins=(a, b)) as (port, _):
+        _, h_a, _ = _request(port, "/ping", headers={"Origin": a})
+        _, h_b, _ = _request(port, "/ping", headers={"Origin": b})
+        _, h_other, _ = _request(
+            port, "/ping", headers={"Origin": "https://c.example"}
+        )
+    assert h_a["Access-Control-Allow-Origin"] == a
+    assert h_b["Access-Control-Allow-Origin"] == b
+    assert "Access-Control-Allow-Origin" not in h_other
+
+
+def test_verbose_logs_request_to_stderr(capfd):
+    """With verbose=True, each request emits a 'bsky-saves: <method> <path>'
+    line to stderr. (capfd captures fd-level output, which is where
+    BaseHTTPRequestHandler's threads write.)"""
+    with serve_in_background(verbose=True) as (port, _):
+        _request(port, "/ping")
+    err = capfd.readouterr().err
+    assert "bsky-saves: GET /ping" in err
+
+
+def test_default_silent_no_request_log(capfd):
+    """Without verbose, no per-request stderr output."""
+    with serve_in_background(verbose=False) as (port, _):
+        _request(port, "/ping")
+    err = capfd.readouterr().err
+    assert "bsky-saves: GET /ping" not in err
