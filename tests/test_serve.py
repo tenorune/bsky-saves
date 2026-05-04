@@ -86,3 +86,61 @@ def test_ping_returns_name_version_features():
         "version": __version__,
         "features": ["fetch-image", "extract-article"],
     }
+
+
+def test_options_preflight_returns_204_with_cors():
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(
+            port,
+            "/fetch-image",
+            method="OPTIONS",
+            headers={"Origin": DEFAULT_ORIGIN},
+        )
+    assert status == 204
+    assert body == b""
+    assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+    assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+    assert headers["Access-Control-Allow-Headers"] == "Content-Type"
+    assert headers["Access-Control-Max-Age"] == "600"
+
+
+def test_cors_allowed_origin_echoed_on_normal_response():
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/ping", headers={"Origin": DEFAULT_ORIGIN}
+        )
+    assert status == 200
+    assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+
+
+def test_cors_disallowed_origin_omits_allow_origin_header():
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/ping", headers={"Origin": "https://evil.example"}
+        )
+    assert status == 200
+    assert "Access-Control-Allow-Origin" not in headers
+    # Other CORS headers still present (CORS is a browser-side mechanism;
+    # absence of Allow-Origin is what fails the request closed).
+    assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+
+
+def test_cors_no_origin_header_request_succeeds():
+    """curl-style requests have no Origin and are allowed (no CORS to apply)."""
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(port, "/ping")
+    assert status == 200
+    # No Allow-Origin header (no Origin header to echo).
+    assert "Access-Control-Allow-Origin" not in headers
+    payload = json.loads(body)
+    assert payload["name"] == "bsky-saves"
+
+
+def test_cors_404_response_still_carries_cors_headers():
+    """Error responses must also include CORS headers so browsers can read them."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/admin", headers={"Origin": DEFAULT_ORIGIN}
+        )
+    assert status == 404
+    assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
