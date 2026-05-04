@@ -54,11 +54,36 @@ bsky-saves enrich --inventory ./saves_inventory.json
 # (flat layout). Records url→path mappings as `local_images` on each entry.
 # Use --uris FILE (newline-delimited at:// URIs) to limit to a subset.
 bsky-saves hydrate images --inventory ./saves_inventory.json --out ./images
+
+# Run a local HTTP helper daemon for bsky-saves-gui (CORS bridge).
+# Binds 127.0.0.1:47826; pass --allow-origin for self-hosted GUI deployments.
+bsky-saves serve
 ```
 
 All commands are **idempotent**: running them again skips already-hydrated
 entries and adds only what's new. Failures are recorded inline (e.g.
 `article_fetch_error`) so subsequent runs don't pointlessly re-hit them.
+
+## `bsky-saves serve`
+
+`bsky-saves serve` runs a small HTTP helper daemon on `127.0.0.1` that
+[bsky-saves-gui](https://github.com/tenorune/bsky-saves-gui) — a static web
+app running `bsky-saves` in Pyodide — calls to fetch image bytes and extract
+article text. Both operations are blocked by CORS in the browser; the helper
+runs on the user's own machine so the actual outbound HTTP happens locally.
+
+```
+bsky-saves serve [--port 47826] [--allow-origin https://saves.lightseed.net]... [--verbose]
+```
+
+The daemon exposes three endpoints (`GET /ping`, `POST /fetch-image`,
+`POST /extract-article`), binds only to `127.0.0.1`, requires no
+authentication or credentials, writes nothing to disk, and reads no
+config files. It's a stateless passthrough that exists for the duration
+of the `serve` invocation.
+
+The full HTTP API contract lives in the consumer-side requirements doc:
+[`bsky-saves-gui/docs/bsky-saves-serve-requirements.md`](https://github.com/tenorune/bsky-saves-gui/blob/main/docs/bsky-saves-serve-requirements.md).
 
 ## Inventory schema
 
