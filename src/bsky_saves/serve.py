@@ -19,8 +19,20 @@ from typing import Callable
 from . import __version__
 
 
-# Populated by individual endpoint tasks; intentionally empty in the skeleton.
-ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {}
+def _handle_ping(handler) -> None:
+    handler._send_json(
+        200,
+        {
+            "name": "bsky-saves",
+            "version": __version__,
+            "features": ["fetch-image", "extract-article"],
+        },
+    )
+
+
+ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
+    ("GET", "/ping"): _handle_ping,
+}
 
 
 class _HandlerLike:

@@ -72,3 +72,17 @@ def test_unknown_method_returns_404():
         status, _, body = _request(port, "/ping", method="DELETE")
     assert status == 404
     assert json.loads(body) == {"error": "not found"}
+
+
+def test_ping_returns_name_version_features():
+    from bsky_saves import __version__
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(port, "/ping")
+    assert status == 200
+    assert headers["Content-Type"] == "application/json"
+    payload = json.loads(body)
+    assert payload == {
+        "name": "bsky-saves",
+        "version": __version__,
+        "features": ["fetch-image", "extract-article"],
+    }
