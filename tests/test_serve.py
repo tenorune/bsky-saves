@@ -144,3 +144,119 @@ def test_cors_404_response_still_carries_cors_headers():
         )
     assert status == 404
     assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+
+
+import httpx as _httpx_mod  # noqa: F401  (used implicitly by respx)
+
+from bsky_saves.images import DEFAULT_USER_AGENT as _IMAGES_UA  # noqa: F401
+
+
+@respx.mock
+def test_fetch_image_happy_path():
+    respx.get("https://cdn.bsky.app/img/x.jpg").respond(
+        200, content=b"BYTES", headers={"Content-Type": "image/jpeg"}
+    )
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            body={"url": "https://cdn.bsky.app/img/x.jpg"},
+        )
+    assert status == 200
+    assert headers["Content-Type"] == "image/jpeg"
+    assert body == b"BYTES"
+
+
+@respx.mock
+def test_fetch_image_subdomain_wildcard_allowed():
+    respx.get("https://video.bsky.app/v.jpg").respond(
+        200, content=b"V", headers={"Content-Type": "image/jpeg"}
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            body={"url": "https://video.bsky.app/v.jpg"},
+        )
+    assert status == 200
+    assert body == b"V"
+
+
+def test_fetch_image_bare_bsky_app_rejected():
+    """Hostname is exactly 'bsky.app' — no leading dot, so subdomain rule doesn't match."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            body={"url": "https://bsky.app/img/x.jpg"},
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_fetch_image_lookalike_domain_rejected():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            body={"url": "https://bskyapp.com/img/x.jpg"},
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_fetch_image_http_scheme_rejected():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            body={"url": "http://cdn.bsky.app/img/x.jpg"},
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_fetch_image_missing_url_rejected():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port, "/fetch-image", method="POST", body={"not_url": "x"}
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "missing url"}
+
+
+@respx.mock
+def test_fetch_image_upstream_4xx_passed_through():
+    respx.get("https://cdn.bsky.app/img/missing.jpg").respond(404)
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            body={"url": "https://cdn.bsky.app/img/missing.jpg"},
+        )
+    assert status == 404
+    assert json.loads(body) == {"error": "upstream 404"}
+
+
+@respx.mock
+def test_fetch_image_network_error_returns_502():
+    import httpx
+    respx.get("https://cdn.bsky.app/img/down.jpg").mock(
+        side_effect=httpx.ConnectError("nope")
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            body={"url": "https://cdn.bsky.app/img/down.jpg"},
+        )
+    assert status == 502
+    payload = json.loads(body)
+    assert "error" in payload

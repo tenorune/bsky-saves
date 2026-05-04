@@ -15,8 +15,13 @@ import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
+from urllib.parse import urlparse
+
+import httpx
 
 from . import __version__
+from .images import DEFAULT_USER_AGENT as _IMAGE_USER_AGENT
+from .images import TIMEOUT as _IMAGE_TIMEOUT
 
 
 def _handle_ping(handler) -> None:
@@ -30,8 +35,47 @@ def _handle_ping(handler) -> None:
     )
 
 
+def _is_allowed_image_url(url: str) -> bool:
+    """Hardcoded allowlist for /fetch-image: https + cdn.bsky.app or *.bsky.app."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    host = parsed.hostname or ""
+    return host == "cdn.bsky.app" or host.endswith(".bsky.app")
+
+
+def _handle_fetch_image(handler) -> None:
+    body = handler._read_json_body()
+    url = (body or {}).get("url")
+    if not isinstance(url, str) or not url:
+        handler._send_json_error(400, "missing url")
+        return
+    if not _is_allowed_image_url(url):
+        handler._send_json_error(400, "url not allowed")
+        return
+    try:
+        r = httpx.get(
+            url,
+            headers={"User-Agent": _IMAGE_USER_AGENT, "Accept": "image/*"},
+            follow_redirects=True,
+            timeout=_IMAGE_TIMEOUT,
+        )
+    except Exception as e:
+        handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
+        return
+    if r.status_code >= 400:
+        handler._send_json_error(r.status_code, f"upstream {r.status_code}")
+        return
+    content_type = r.headers.get("Content-Type", "application/octet-stream")
+    handler._send_bytes(r.status_code, content_type, r.content)
+
+
 ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("GET", "/ping"): _handle_ping,
+    ("POST", "/fetch-image"): _handle_fetch_image,
 }
 
 
