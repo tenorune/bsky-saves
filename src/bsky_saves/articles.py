@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,8 +34,36 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def fetch_article(url: str, *, user_agent: str = DEFAULT_USER_AGENT) -> tuple[dict | None, str | None]:
-    """Return (result, error). result is {"text": str, "date": str|None}."""
+@dataclass
+class ArticleExtraction:
+    """Result of a successful article HTTP fetch + trafilatura extraction.
+
+    Returned by ``_extract_article``. Both ``serve``'s extract-article handler
+    and the v0.2 ``fetch_article`` adapter consume this; each maps it to its
+    own response shape.
+    """
+    url: str
+    text: str            # may be "" when the page yielded no extractable body
+    title: str | None
+    date: str | None     # ISO date string if extractable
+    fetched_at: str      # ISO timestamp; set whenever the HTTP fetch succeeded
+    short: bool          # True if text is non-empty but below MIN_EXTRACT_CHARS,
+                         # OR text is empty (paywall / login wall / JS-rendered)
+
+
+def _extract_article(
+    url: str,
+    *,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> tuple[ArticleExtraction | None, str | None]:
+    """Lower-level article fetch + extraction. Returns (extraction, error);
+    exactly one is non-None.
+
+    Errors:
+      - "fetch_error:<ExceptionType>:<message-truncated>" — httpx raised.
+      - "http_<status>" — upstream returned 4xx/5xx.
+      - "extraction_failed" — trafilatura returned None.
+    """
     try:
         r = httpx.get(
             url,
@@ -58,12 +87,47 @@ def fetch_article(url: str, *, user_agent: str = DEFAULT_USER_AGENT) -> tuple[di
     if extracted is None:
         return None, "extraction_failed"
 
-    text = getattr(extracted, "text", None) if not isinstance(extracted, dict) else extracted.get("text")
-    date = getattr(extracted, "date", None) if not isinstance(extracted, dict) else extracted.get("date")
+    if isinstance(extracted, dict):
+        text = extracted.get("text") or ""
+        title = extracted.get("title")
+        date = extracted.get("date")
+    else:
+        text = getattr(extracted, "text", "") or ""
+        title = getattr(extracted, "title", None)
+        date = getattr(extracted, "date", None)
 
-    if not text or len(text.strip()) < MIN_EXTRACT_CHARS:
+    text = text.strip()
+    short = (not text) or len(text) < MIN_EXTRACT_CHARS
+
+    return (
+        ArticleExtraction(
+            url=url,
+            text=text if not short else "",
+            title=title or None,
+            date=date or None,
+            fetched_at=_now_iso(),
+            short=short,
+        ),
+        None,
+    )
+
+
+def fetch_article(
+    url: str,
+    *,
+    user_agent: str = DEFAULT_USER_AGENT,
+) -> tuple[dict | None, str | None]:
+    """v0.2 public adapter. Returns ({"text": str, "date": str|None}, None)
+    on success, or (None, error_string) otherwise.
+
+    Preserves the exact v0.2 contract used by ``hydrate_articles``."""
+    extraction, error = _extract_article(url, user_agent=user_agent)
+    if error is not None:
+        return None, error
+    assert extraction is not None  # for type checkers
+    if extraction.short:
         return None, "extraction_too_short_or_empty"
-    return {"text": text.strip(), "date": date}, None
+    return {"text": extraction.text, "date": extraction.date}, None
 
 
 def hydrate_articles(
