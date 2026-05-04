@@ -260,3 +260,99 @@ def test_fetch_image_network_error_returns_502():
     assert status == 502
     payload = json.loads(body)
     assert "error" in payload
+
+
+@respx.mock
+def test_extract_article_happy_path():
+    html = (
+        "<html><head><title>Hello</title></head><body><article>"
+        + ("Body text. " * 30)
+        + "</article></body></html>"
+    )
+    respx.get("https://example.com/a").respond(200, html=html)
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            body={"url": "https://example.com/a"},
+        )
+    assert status == 200
+    assert headers["Content-Type"] == "application/json"
+    payload = json.loads(body)
+    assert payload["url"] == "https://example.com/a"
+    assert payload["title"] == "Hello"
+    assert "Body text." in payload["text"]
+    assert "fetched_at" in payload
+    assert "note" not in payload
+
+
+@respx.mock
+def test_extract_article_empty_body_returns_200_with_note():
+    html = "<html><body><article>too short</article></body></html>"
+    respx.get("https://example.com/short").respond(200, html=html)
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            body={"url": "https://example.com/short"},
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["url"] == "https://example.com/short"
+    assert payload["text"] == ""
+    assert payload["note"] == "no extractable body"
+    assert "fetched_at" in payload
+
+
+def test_extract_article_disallowed_scheme():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            body={"url": "file:///etc/passwd"},
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url scheme not allowed"}
+
+
+def test_extract_article_missing_url():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port, "/extract-article", method="POST", body={"not_url": "x"}
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "missing url"}
+
+
+@respx.mock
+def test_extract_article_upstream_5xx_passed_through():
+    respx.get("https://example.com/down").respond(503)
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            body={"url": "https://example.com/down"},
+        )
+    assert status == 503
+    assert json.loads(body) == {"error": "upstream 503"}
+
+
+@respx.mock
+def test_extract_article_network_error_returns_502():
+    import httpx
+    respx.get("https://example.com/x").mock(
+        side_effect=httpx.ConnectError("dns"),
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            body={"url": "https://example.com/x"},
+        )
+    assert status == 502
+    assert "error" in json.loads(body)

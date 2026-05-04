@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 import httpx
 
 from . import __version__
+from .articles import _extract_article
 from .images import DEFAULT_USER_AGENT as _IMAGE_USER_AGENT
 from .images import TIMEOUT as _IMAGE_TIMEOUT
 
@@ -73,9 +74,49 @@ def _handle_fetch_image(handler) -> None:
     handler._send_bytes(r.status_code, content_type, r.content)
 
 
+def _handle_extract_article(handler) -> None:
+    body = handler._read_json_body()
+    url = (body or {}).get("url")
+    if not isinstance(url, str) or not url:
+        handler._send_json_error(400, "missing url")
+        return
+    scheme = (urlparse(url).scheme or "").lower()
+    if scheme not in ("http", "https"):
+        handler._send_json_error(400, "url scheme not allowed")
+        return
+
+    extraction, error = _extract_article(url)
+    if error is not None:
+        if error.startswith("http_"):
+            try:
+                code = int(error.split("_", 1)[1])
+            except ValueError:
+                code = 502
+            handler._send_json_error(code, f"upstream {code}")
+            return
+        if error.startswith("fetch_error:"):
+            handler._send_json_error(502, error)
+            return
+        # extraction_failed and any other error → 502 server-side problem.
+        handler._send_json_error(502, error)
+        return
+
+    assert extraction is not None
+    payload = {
+        "url": extraction.url,
+        "title": extraction.title,
+        "text": extraction.text,
+        "fetched_at": extraction.fetched_at,
+    }
+    if extraction.short:
+        payload["note"] = "no extractable body"
+    handler._send_json(200, payload)
+
+
 ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("GET", "/ping"): _handle_ping,
     ("POST", "/fetch-image"): _handle_fetch_image,
+    ("POST", "/extract-article"): _handle_extract_article,
 }
 
 
