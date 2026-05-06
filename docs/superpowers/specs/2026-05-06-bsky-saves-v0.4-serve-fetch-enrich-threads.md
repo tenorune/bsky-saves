@@ -172,16 +172,19 @@ def _handle_fetch(handler) -> None:
             endpoint_id=endpoint_id, cursor=upstream_cursor, limit=limit,
         )
     except _DirectEndpointFailedError:
-        # Silent fallback: re-probe and continue (per requirements doc §1).
-        # The fresh probe ignores the failed endpoint_id but DOES carry the
-        # upstream cursor through — the new winner picks up at the same page,
-        # not from scratch. (Different endpoints share the same upstream
-        # cursor format in practice; if a winner rejects the cursor, that
-        # surfaces as a separate error rather than silent data loss.)
+        # Silent fallback: re-probe from a fresh state (per requirements doc §1).
+        # The fresh probe drops the upstream cursor — the four bookmark
+        # endpoints have incompatible cursor formats (e.g., pds:listRecords
+        # uses an rkey-TID; bookmark.getBookmarks uses an opaque lexicon
+        # cursor; getActorBookmarks uses a different opaque AppView cursor),
+        # so carrying a cursor across endpoint boundaries risks either an
+        # immediate error or — worse — a silently wrong page. Restarting
+        # from page 1 is correct-by-construction; the cost is one round of
+        # re-pagination, which the GUI absorbs as "the helper hiccupped."
         chosen_id, raw, next_upstream = fetch_one_page(
             session,
             pds_base=creds["pds"], appview_base=APPVIEW_BASE,
-            endpoint_id=None, cursor=upstream_cursor, limit=limit,
+            endpoint_id=None, cursor=None, limit=limit,
         )
     except NoBookmarkEndpointError as e:
         handler._send_json_error(502, f"no working bookmark endpoint: {e}")
@@ -198,7 +201,9 @@ def _handle_fetch(handler) -> None:
 
 ### Constants
 
-- `APPVIEW_BASE = "https://bsky.social"` — the appview side of the probe. Same default the v0.2 CLI fetch uses.
+- `APPVIEW_BASE = "https://bsky.social"` — the AppView host used by the bookmark-endpoint probe in `/fetch`. Same default the v0.2 CLI fetch uses (`fetch_to_inventory`'s `appview_base` default). For most probe configurations this host is never actually called — the PDS-direct path wins first — but it's the fallback target when probing reaches the AppView entries in `BOOKMARK_ENDPOINTS`.
+
+  **Note**: this is a different AppView host from `PUBLIC_APPVIEW` used in `/hydrate-threads` (see §7). The two endpoints address two AppView-shaped surfaces: `bsky.social` is the auth-ed AppView reachable from a logged-in session; `public.api.bsky.app` is the unauthenticated public AppView used for thread reads. We keep them as separate constants because they're addressing different lexicon surfaces with different auth assumptions.
 
 ## 6. `POST /enrich` implementation
 
@@ -450,7 +455,7 @@ Design choices to keep `/run` cheap to add later (already incidentally true afte
 | 2026-05-06 | All new endpoints in existing `serve.py`; no submodule split. |
 | 2026-05-06 | Refactor: new `fetch.fetch_one_page` helper for single-page granularity; existing `probe_bookmark_endpoints` and `fetch_to_inventory` unchanged. |
 | 2026-05-06 | Cursor encoding: `urlsafe-base64(JSON({v: 1, endpoint, upstream}))`, opaque to GUI. Daemon's private contract. |
-| 2026-05-06 | Silent endpoint fallback: when a wrapped cursor's named endpoint hard-fails, daemon re-probes and emits a fresh cursor pointing at the new winner. Invisible to GUI. |
+| 2026-05-06 | Silent endpoint fallback: when a wrapped cursor's named endpoint hard-fails, daemon re-probes and emits a fresh cursor pointing at the new winner. The fallback **drops the upstream cursor** and restarts from page 1 — the four bookmark endpoints have incompatible cursor formats, so cross-endpoint cursor reuse risks silently wrong pages. The GUI absorbs one round of re-pagination on fallback as "the helper hiccupped." Invisible to GUI other than the latency bump. |
 | 2026-05-06 | Credentials shape: `{handle, app_password, pds?}`. `pds` defaults to `"https://bsky.social"` when absent (matches CLI behavior). `handle` and `app_password` are required; absent → 400 missing credentials. |
 | 2026-05-06 | `/enrich`: pure offline TID decode, no credentials required, sub-second latency, per-URI failure reason is the static string `"invalid at-uri"`. |
 | 2026-05-06 | `/hydrate-threads` concurrency: `ThreadPoolExecutor(max_workers=5)` per request. No rate-limit sleep between upstream calls. |
