@@ -752,3 +752,91 @@ def test_fetch_limit_clamping():
             "limit": 0,
         })
     assert seen_limits == [100, 1]
+
+
+# --- /enrich endpoint ---
+
+
+def test_enrich_decodes_post_created_at_for_each_uri():
+    """Valid at-URIs with TID rkeys → enriched populated in input order."""
+    uri1 = "at://did:plc:abc/app.bsky.feed.post/3jzfcijpj2z2a"
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/enrich",
+            method="POST",
+            body={"uris": [uri1]},
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["enriched"]) == 1
+    assert payload["enriched"][0]["uri"] == uri1
+    assert isinstance(payload["enriched"][0]["post_created_at"], str)
+    assert payload["enriched"][0]["post_created_at"]
+    assert payload["errors"] == []
+
+
+def test_enrich_invalid_uri_lands_in_errors():
+    """Empty / non-string / malformed at-URI → errors[] with reason 'invalid at-uri'."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/enrich",
+            method="POST",
+            body={"uris": ["", "not-a-uri", 42]},
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["enriched"] == []
+    assert len(payload["errors"]) == 3
+    for err in payload["errors"]:
+        assert err["reason"] == "invalid at-uri"
+
+
+def test_enrich_missing_uris_field_returns_400():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(port, "/enrich", method="POST", body={})
+    assert status == 400
+    assert json.loads(body) == {"error": "missing uris"}
+
+
+def test_enrich_empty_uris_list_returns_200_with_empty_arrays():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(port, "/enrich", method="POST", body={"uris": []})
+    assert status == 200
+    assert json.loads(body) == {"enriched": [], "errors": []}
+
+
+def test_enrich_credentials_field_is_ignored():
+    """Body with credentials is accepted (no 400); credentials are unused."""
+    uri1 = "at://did:plc:abc/app.bsky.feed.post/3jzfcijpj2z2a"
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/enrich",
+            method="POST",
+            body={
+                "uris": [uri1],
+                "credentials": {"handle": "x", "app_password": "y"},
+            },
+        )
+    assert status == 200
+    assert len(json.loads(body)["enriched"]) == 1
+
+
+def test_enrich_mixed_valid_and_invalid():
+    """Both arrays populated, input order preserved within each."""
+    valid = "at://did:plc:abc/app.bsky.feed.post/3jzfcijpj2z2a"
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/enrich",
+            method="POST",
+            body={"uris": [valid, "", valid, "bogus"]},
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["enriched"]) == 2
+    assert payload["enriched"][0]["uri"] == valid
+    assert payload["enriched"][1]["uri"] == valid
+    assert len(payload["errors"]) == 2

@@ -32,6 +32,7 @@ from .fetch import (
 from .images import DEFAULT_USER_AGENT as _IMAGE_USER_AGENT
 from .images import TIMEOUT as _IMAGE_TIMEOUT
 from .normalize import normalise_record
+from .tid import rkey_of, decode_tid_to_iso
 
 
 def _handle_ping(handler) -> None:
@@ -190,11 +191,38 @@ def _handle_fetch(handler) -> None:
     handler._send_json(200, {"saves": saves, "cursor": out_cursor})
 
 
+def _handle_enrich(handler) -> None:
+    body = handler._read_json_body()
+    uris = (body or {}).get("uris")
+    if not isinstance(uris, list):
+        handler._send_json_error(400, "missing uris")
+        return
+
+    enriched: list[dict] = []
+    errors: list[dict] = []
+    for uri in uris:
+        if not isinstance(uri, str) or not uri:
+            errors.append({
+                "uri": uri if isinstance(uri, str) else "",
+                "reason": "invalid at-uri",
+            })
+            continue
+        try:
+            post_created_at = decode_tid_to_iso(rkey_of(uri))
+        except Exception:
+            errors.append({"uri": uri, "reason": "invalid at-uri"})
+            continue
+        enriched.append({"uri": uri, "post_created_at": post_created_at})
+
+    handler._send_json(200, {"enriched": enriched, "errors": errors})
+
+
 ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("GET", "/ping"): _handle_ping,
     ("POST", "/fetch-image"): _handle_fetch_image,
     ("POST", "/extract-article"): _handle_extract_article,
     ("POST", "/fetch"): _handle_fetch,
+    ("POST", "/enrich"): _handle_enrich,
 }
 
 
