@@ -405,3 +405,90 @@ def test_default_silent_no_request_log(capfd):
         _request(port, "/ping")
     err = capfd.readouterr().err
     assert "bsky-saves: GET /ping" not in err
+
+
+# --- v0.4 helpers ---
+
+from bsky_saves.serve import _validate_creds, _encode_cursor, _decode_cursor
+
+
+def test_validate_creds_returns_dict_with_pds_default_when_pds_omitted():
+    result = _validate_creds({"handle": "alice.bsky.social", "app_password": "xxxx"})
+    assert result == {
+        "handle": "alice.bsky.social",
+        "app_password": "xxxx",
+        "pds": "https://bsky.social",
+    }
+
+
+def test_validate_creds_returns_dict_with_explicit_pds():
+    result = _validate_creds({
+        "handle": "alice.bsky.social",
+        "app_password": "xxxx",
+        "pds": "https://eurosky.social",
+    })
+    assert result["pds"] == "https://eurosky.social"
+
+
+def test_validate_creds_returns_dict_with_pds_default_when_pds_empty_string():
+    result = _validate_creds({
+        "handle": "alice.bsky.social",
+        "app_password": "xxxx",
+        "pds": "",
+    })
+    assert result["pds"] == "https://bsky.social"
+
+
+def test_validate_creds_returns_None_when_handle_missing():
+    assert _validate_creds({"app_password": "xxxx"}) is None
+
+
+def test_validate_creds_returns_None_when_app_password_missing():
+    assert _validate_creds({"handle": "alice.bsky.social"}) is None
+
+
+def test_validate_creds_returns_None_when_creds_is_None():
+    assert _validate_creds(None) is None
+
+
+def test_validate_creds_returns_None_when_creds_is_not_dict():
+    assert _validate_creds("not a dict") is None
+    assert _validate_creds([]) is None
+    assert _validate_creds(42) is None
+
+
+def test_encode_cursor_round_trips_through_decode():
+    wrapped = _encode_cursor("pds:bookmark.getBookmarks", "upstream-cursor-abc")
+    decoded = _decode_cursor(wrapped)
+    assert decoded == {"v": 1, "endpoint": "pds:bookmark.getBookmarks", "upstream": "upstream-cursor-abc"}
+
+
+def test_encode_cursor_handles_None_upstream():
+    wrapped = _encode_cursor("appview:getActorBookmarks", None)
+    decoded = _decode_cursor(wrapped)
+    assert decoded == {"v": 1, "endpoint": "appview:getActorBookmarks", "upstream": None}
+
+
+def test_decode_cursor_returns_None_for_garbage():
+    assert _decode_cursor("not-base64!!!") is None
+    assert _decode_cursor("") is None
+    # Base64 of valid-looking JSON but missing required fields
+    import base64, json
+    bad_json = base64.urlsafe_b64encode(json.dumps({"foo": "bar"}).encode()).decode()
+    assert _decode_cursor(bad_json) is None
+
+
+def test_decode_cursor_returns_None_for_unknown_endpoint_id():
+    import base64, json
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"v": 1, "endpoint": "totally:unknown", "upstream": "x"}).encode()
+    ).decode()
+    assert _decode_cursor(payload) is None
+
+
+def test_decode_cursor_returns_None_for_wrong_version():
+    import base64, json
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"v": 99, "endpoint": "pds:bookmark.getBookmarks", "upstream": "x"}).encode()
+    ).decode()
+    assert _decode_cursor(payload) is None

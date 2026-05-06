@@ -11,6 +11,7 @@ https://github.com/tenorune/bsky-saves-gui/blob/main/docs/bsky-saves-serve-requi
 """
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,6 +22,7 @@ import httpx
 
 from . import __version__
 from .articles import _extract_article
+from .fetch import ENDPOINT_IDS
 from .images import DEFAULT_USER_AGENT as _IMAGE_USER_AGENT
 from .images import TIMEOUT as _IMAGE_TIMEOUT
 
@@ -124,6 +126,72 @@ class _HandlerLike:
     """Type stub for request handlers. The real type is the class returned by
     make_handler; this exists only to give the ROUTES table a clean Callable
     annotation without triggering a forward-reference dance."""
+
+
+DEFAULT_PDS = "https://bsky.social"
+
+
+def _validate_creds(creds: object) -> dict | None:
+    """Validate a credentials dict from a request body.
+
+    Required fields: handle, app_password (both must be non-empty strings).
+    Optional field: pds (defaults to "https://bsky.social" when absent or empty).
+
+    Returns a normalized dict with all three fields populated, or None if
+    required fields are missing / wrong type.
+    """
+    if not isinstance(creds, dict):
+        return None
+    handle = creds.get("handle")
+    app_password = creds.get("app_password")
+    if not isinstance(handle, str) or not handle:
+        return None
+    if not isinstance(app_password, str) or not app_password:
+        return None
+    pds = creds.get("pds")
+    if not isinstance(pds, str) or not pds:
+        pds = DEFAULT_PDS
+    return {"handle": handle, "app_password": app_password, "pds": pds}
+
+
+def _encode_cursor(endpoint_id: str, upstream_cursor: str | None) -> str:
+    """Encode an opaque pagination cursor for /fetch.
+
+    Format: urlsafe-base64(JSON({v: 1, endpoint, upstream})).
+    The GUI MUST treat this as fully opaque and round-trip it byte-for-byte.
+    """
+    payload = {"v": 1, "endpoint": endpoint_id, "upstream": upstream_cursor}
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _decode_cursor(wrapped: str) -> dict | None:
+    """Decode an opaque pagination cursor produced by _encode_cursor.
+
+    Returns the {v, endpoint, upstream} dict on success; None if the cursor
+    is corrupted, malformed, has an unknown schema version, or names an
+    unknown endpoint id.
+    """
+    if not isinstance(wrapped, str) or not wrapped:
+        return None
+    try:
+        raw = base64.urlsafe_b64decode(wrapped.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("v") != 1:
+        return None
+    endpoint = payload.get("endpoint")
+    if not isinstance(endpoint, str):
+        return None
+    if endpoint not in ENDPOINT_IDS.values():
+        return None
+    upstream = payload.get("upstream")
+    if upstream is not None and not isinstance(upstream, str):
+        return None
+    return {"v": 1, "endpoint": endpoint, "upstream": upstream}
 
 
 def make_handler(
