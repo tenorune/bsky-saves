@@ -447,3 +447,139 @@ def test_progress_tty_terminates_with_newline_before_error(capsys, monkeypatch):
     assert idx_progress < idx_error
     # There must be a newline between them.
     assert "\n" in err[idx_progress:idx_error]
+
+
+# --- v0.4.1: structured status info on exceptions ---
+
+
+@respx.mock
+def test_direct_endpoint_failed_carries_status_code():
+    """When fetch_one_page is called with a named endpoint and that endpoint
+    returns a failure status, _DirectEndpointFailedError carries the status_code."""
+    from bsky_saves.fetch import fetch_one_page, _DirectEndpointFailedError
+    session = _mock_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(401, json={"error": "ExpiredToken"})
+    )
+    with pytest.raises(_DirectEndpointFailedError) as exc_info:
+        fetch_one_page(
+            session,
+            pds_base=PDS_BASE,
+            appview_base=APPVIEW_BASE,
+            endpoint_id="pds:bookmark.getBookmarks",
+            cursor="some-cursor",
+            limit=100,
+        )
+    assert exc_info.value.status_code == 401
+
+
+@respx.mock
+def test_direct_endpoint_failed_no_status_code_on_transport_error():
+    """Network errors (httpx exception) leave status_code as None."""
+    from bsky_saves.fetch import fetch_one_page, _DirectEndpointFailedError
+    session = _mock_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=httpx.ConnectError("dns fail")
+    )
+    with pytest.raises(_DirectEndpointFailedError) as exc_info:
+        fetch_one_page(
+            session,
+            pds_base=PDS_BASE,
+            appview_base=APPVIEW_BASE,
+            endpoint_id="pds:bookmark.getBookmarks",
+            cursor="some-cursor",
+            limit=100,
+        )
+    assert exc_info.value.status_code is None
+
+
+@respx.mock
+def test_no_bookmark_endpoint_error_carries_status_codes():
+    """When fetch_one_page probes and every endpoint returns a failure status,
+    NoBookmarkEndpointError carries the list of observed status codes."""
+    from bsky_saves.fetch import fetch_one_page, NoBookmarkEndpointError
+    session = _mock_session()
+    # All bookmark endpoints (PDS_BASE == APPVIEW_BASE in this test fixture,
+    # so the routes overlap; we use side_effect to advance through them).
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(401, json={"error": "ExpiredToken"}),  # pds:bookmark.getBookmarks
+            httpx.Response(401, json={"error": "ExpiredToken"}),  # appview:bookmark.getBookmarks
+        ]
+    )
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.feed.getActorBookmarks").mock(
+        return_value=httpx.Response(401, json={"error": "ExpiredToken"})
+    )
+    respx.get(f"{PDS_BASE}/xrpc/com.atproto.repo.listRecords").mock(
+        return_value=httpx.Response(401, json={"error": "ExpiredToken"})
+    )
+    with pytest.raises(NoBookmarkEndpointError) as exc_info:
+        fetch_one_page(
+            session,
+            pds_base=PDS_BASE,
+            appview_base=APPVIEW_BASE,
+            endpoint_id=None,  # probe
+            cursor=None,
+            limit=100,
+        )
+    # All four endpoints failed with 401.
+    assert exc_info.value.status_codes == [401, 401, 401, 401]
+
+
+# --- v0.4.1: refresh_session helper ---
+
+
+@respx.mock
+def test_refresh_session_returns_new_token_pair():
+    from bsky_saves.auth import refresh_session
+    respx.post(f"{PDS_BASE}/xrpc/com.atproto.server.refreshSession").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "accessJwt": "new-access",
+                "refreshJwt": "new-refresh",
+                "did": "did:plc:xyz",
+                "handle": "alice.bsky.social",
+            },
+        )
+    )
+    result = refresh_session(PDS_BASE, "old-refresh")
+    assert result["accessJwt"] == "new-access"
+    assert result["refreshJwt"] == "new-refresh"
+    assert result["did"] == "did:plc:xyz"
+
+
+@respx.mock
+def test_refresh_session_passes_refresh_jwt_as_bearer():
+    """Verify the daemon sends the refresh_jwt in the Authorization header."""
+    from bsky_saves.auth import refresh_session
+    seen_auth: list[str] = []
+
+    def capture(request):
+        seen_auth.append(request.headers.get("Authorization", ""))
+        return httpx.Response(
+            200,
+            json={
+                "accessJwt": "new",
+                "refreshJwt": "new-r",
+                "did": "did:plc:x",
+                "handle": "x",
+            },
+        )
+
+    respx.post(f"{PDS_BASE}/xrpc/com.atproto.server.refreshSession").mock(
+        side_effect=capture
+    )
+    refresh_session(PDS_BASE, "the-refresh-jwt")
+    assert seen_auth == ["Bearer the-refresh-jwt"]
+
+
+@respx.mock
+def test_refresh_session_raises_on_4xx():
+    """A revoked or expired refresh_jwt typically returns 400 ExpiredToken."""
+    from bsky_saves.auth import refresh_session
+    respx.post(f"{PDS_BASE}/xrpc/com.atproto.server.refreshSession").mock(
+        return_value=httpx.Response(400, json={"error": "ExpiredToken"})
+    )
+    with pytest.raises(httpx.HTTPStatusError):
+        refresh_session(PDS_BASE, "expired-refresh")

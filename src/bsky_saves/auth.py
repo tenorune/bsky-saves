@@ -64,3 +64,32 @@ def get_service_auth(pds_base: str, session: dict, aud: str, lxm: str) -> str:
         )
     payload = r.json()
     return payload.get("token", "")
+
+
+def refresh_session(pds_base: str, refresh_jwt: str) -> dict:
+    """Refresh an AT Protocol session via com.atproto.server.refreshSession.
+
+    Returns a fresh session dict with new accessJwt, refreshJwt, did, handle.
+    The refresh_jwt becomes invalidated by AT Protocol once it's been used to
+    mint a new pair — callers MUST persist the rotated tokens before the next
+    refresh attempt.
+
+    Raises httpx.HTTPStatusError on non-2xx (typical: 400 ExpiredToken or
+    400 InvalidToken when the refresh_jwt is itself expired or revoked).
+    """
+    r = httpx.post(
+        f"{pds_base.rstrip('/')}/xrpc/com.atproto.server.refreshSession",
+        headers={"Authorization": f"Bearer {refresh_jwt}"},
+        timeout=30.0,
+    )
+    if r.status_code >= 400:
+        try:
+            body = r.json()
+        except ValueError:
+            body = {"raw": r.text[:500]}
+        print(
+            f"bsky-saves: refreshSession returned {r.status_code}: {body}",
+            file=sys.stderr,
+        )
+    r.raise_for_status()
+    return r.json()

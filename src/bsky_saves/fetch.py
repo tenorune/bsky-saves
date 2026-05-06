@@ -43,10 +43,21 @@ ENDPOINT_IDS: dict[tuple[str, str], str] = {
 class _DirectEndpointFailedError(Exception):
     """Raised by fetch_one_page when the explicitly-named endpoint hard-fails.
 
-    serve.py's /fetch handler catches this to trigger a silent fallback re-probe.
+    serve.py's /fetch handler catches this to trigger a silent fallback re-probe
+    or, in the JWT-pair credential path, a refreshSession + retry on 401.
+
     Distinct from NoBookmarkEndpointError (which is raised after exhausting all
     candidates during a probe).
+
+    Attributes:
+        status_code: the HTTP status code from the upstream response, or None
+            if the failure was a transport-level error (httpx exception,
+            service-auth error, etc.).
     """
+
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 BOOKMARK_ENDPOINTS: list[tuple[str, str, EndpointParams]] = [
@@ -95,7 +106,16 @@ def _stderr_is_tty() -> bool:
 
 
 class NoBookmarkEndpointError(Exception):
-    """All probed bookmark endpoints failed."""
+    """All probed bookmark endpoints failed.
+
+    Attributes:
+        status_codes: list of HTTP status codes observed across the probe
+            attempts. May be empty if all failures were transport-level.
+    """
+
+    def __init__(self, message: str, status_codes: list[int] | None = None):
+        super().__init__(message)
+        self.status_codes = list(status_codes or [])
 
 
 def _records_from_response(data: dict) -> list[dict]:
@@ -125,6 +145,7 @@ def probe_bookmark_endpoints(
     pds_headers = {"Authorization": f"Bearer {session['accessJwt']}"}
     did = session["did"]
     tried: list[str] = []
+    status_codes: list[int] = []
 
     same_server = pds_base == appview_base
 
@@ -203,6 +224,7 @@ def probe_bookmark_endpoints(
 
                     if r.status_code in ENDPOINT_FAILURE_CODES:
                         tried.append(f"{host}:{method}{aud_tag} -> {r.status_code}")
+                        status_codes.append(r.status_code)
                         request_failed = True
                         break
 
@@ -249,7 +271,8 @@ def probe_bookmark_endpoints(
             return method, records
 
     raise NoBookmarkEndpointError(
-        "All bookmark endpoints failed: " + "; ".join(tried)
+        "All bookmark endpoints failed: " + "; ".join(tried),
+        status_codes=status_codes,
     )
 
 
@@ -380,6 +403,7 @@ def fetch_one_page(
             raise _DirectEndpointFailedError(f"unknown endpoint_id: {endpoint_id}")
 
     tried: list[str] = []
+    status_codes: list[int] = []
     for host, method, params_factory, eid in candidates:
         base = pds_base if host == "pds" else appview_base
         # Service-auth handling — same logic as probe_bookmark_endpoints.
@@ -416,7 +440,10 @@ def fetch_one_page(
         if r.status_code in ENDPOINT_FAILURE_CODES:
             tried.append(f"{eid}:{r.status_code}")
             if endpoint_id is not None:
-                raise _DirectEndpointFailedError("; ".join(tried))
+                raise _DirectEndpointFailedError(
+                    "; ".join(tried), status_code=r.status_code
+                )
+            status_codes.append(r.status_code)
             continue
 
         # Success path.
@@ -427,5 +454,6 @@ def fetch_one_page(
         return eid, page, (next_cursor or None)
 
     raise NoBookmarkEndpointError(
-        "All bookmark endpoints failed: " + "; ".join(tried)
+        "All bookmark endpoints failed: " + "; ".join(tried),
+        status_codes=status_codes,
     )
