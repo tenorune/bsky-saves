@@ -840,3 +840,329 @@ def test_enrich_mixed_valid_and_invalid():
     assert payload["enriched"][0]["uri"] == valid
     assert payload["enriched"][1]["uri"] == valid
     assert len(payload["errors"]) == 2
+
+
+# --- /hydrate-threads endpoint ---
+
+import threading
+
+
+def _thread_view_post(uri, did, text, replies=None):
+    """Build a fetch_thread response that exercises collect_same_author_replies."""
+    return {
+        "thread": {
+            "post": {
+                "uri": uri,
+                "author": {"did": did, "handle": "x.bsky.social"},
+                "indexedAt": "2026-05-06T00:00:00Z",
+                "record": {"text": text},
+                "embed": {},
+            },
+            "replies": replies or [],
+        }
+    }
+
+
+@respx.mock
+def test_hydrate_threads_returns_threaded_in_input_order():
+    _mock_fetch_create_session()
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        side_effect=lambda req: httpx.Response(
+            200,
+            json=_thread_view_post(
+                req.url.params["uri"], "did:plc:x", "post text"
+            ),
+        )
+    )
+    uris = [
+        "at://did:plc:x/app.bsky.feed.post/aaa",
+        "at://did:plc:x/app.bsky.feed.post/bbb",
+        "at://did:plc:x/app.bsky.feed.post/ccc",
+    ]
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": uris,
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert [t["uri"] for t in payload["threaded"]] == uris  # input order preserved
+    assert payload["errors"] == []
+
+
+@respx.mock
+def test_hydrate_threads_thread_replies_uses_v4_chain_logic():
+    """A reply tree where OP responds to other commenters yields no thread_replies
+    (v0.3.1 chain-broken fix); a true self-thread chain yields the chain."""
+    _mock_fetch_create_session()
+    op_did = "did:plc:op"
+    other_did = "did:plc:other"
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "thread": {
+                    "post": {
+                        "uri": "at://op/root",
+                        "author": {"did": op_did, "handle": "op.bsky.social"},
+                        "indexedAt": "2026-05-06T00:00:00Z",
+                        "record": {"text": "root"},
+                        "embed": {},
+                    },
+                    "replies": [
+                        {
+                            "post": {
+                                "uri": "at://op/cont",
+                                "author": {"did": op_did, "handle": "op.bsky.social"},
+                                "indexedAt": "2026-05-06T00:01:00Z",
+                                "record": {"text": "self continuation"},
+                                "embed": {},
+                            },
+                            "replies": [],
+                        },
+                        {
+                            "post": {
+                                "uri": "at://other/c1",
+                                "author": {"did": other_did, "handle": "other.bsky.social"},
+                                "indexedAt": "2026-05-06T00:02:00Z",
+                                "record": {"text": "comment"},
+                                "embed": {},
+                            },
+                            "replies": [
+                                {
+                                    "post": {
+                                        "uri": "at://op/reply-to-other",
+                                        "author": {"did": op_did, "handle": "op.bsky.social"},
+                                        "indexedAt": "2026-05-06T00:03:00Z",
+                                        "record": {"text": "thank you"},
+                                        "embed": {},
+                                    },
+                                    "replies": [],
+                                }
+                            ],
+                        },
+                    ],
+                }
+            },
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://op/root"],
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            },
+        )
+    assert status == 200
+    entry = json.loads(body)["threaded"][0]
+    reply_uris = [r["uri"] for r in entry["thread_replies"]]
+    assert reply_uris == ["at://op/cont"]
+
+
+@respx.mock
+def test_hydrate_threads_per_uri_failure_lands_in_errors_with_diagnostic():
+    _mock_fetch_create_session()
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        side_effect=[
+            httpx.Response(404, json={"error": "NotFound"}),
+            httpx.Response(
+                200,
+                json=_thread_view_post("at://x/p/2", "did:plc:x", "ok"),
+            ),
+        ]
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1", "at://x/p/2"],
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["threaded"]) == 1
+    assert payload["threaded"][0]["uri"] == "at://x/p/2"
+    assert len(payload["errors"]) == 1
+    assert payload["errors"][0]["uri"] == "at://x/p/1"
+    assert "404" in payload["errors"][0]["reason"]
+
+
+@respx.mock
+def test_hydrate_threads_credentials_validated_via_create_session():
+    """Mock observes daemon called createSession once with the request's credentials."""
+    create_session_route = respx.post(
+        f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={"accessJwt": "x", "refreshJwt": "y", "did": "did:plc:x", "handle": "alice.bsky.social"},
+        )
+    )
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        return_value=httpx.Response(
+            200, json=_thread_view_post("at://x/p/1", "did:plc:x", "ok")
+        )
+    )
+    with serve_in_background() as (port, _):
+        _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            },
+        )
+    assert create_session_route.called
+    assert create_session_route.call_count == 1
+
+
+@respx.mock
+def test_hydrate_threads_invalid_credentials_returns_401():
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession").mock(
+        return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
+    )
+    upstream = respx.get(
+        "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread"
+    ).mock(return_value=httpx.Response(200, json={}))
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {"handle": "alice.bsky.social", "app_password": "wrong"},
+            },
+        )
+    assert status == 401
+    assert not upstream.called  # no upstream calls when creds invalid
+
+
+@respx.mock
+def test_hydrate_threads_uses_public_appview_unauthenticated():
+    """Mock asserts the request to getPostThread had no Authorization header."""
+    _mock_fetch_create_session()
+    seen_auth_headers: list[str | None] = []
+
+    def capture(request):
+        seen_auth_headers.append(request.headers.get("Authorization"))
+        return httpx.Response(
+            200, json=_thread_view_post("at://x/p/1", "did:plc:x", "ok")
+        )
+
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        side_effect=capture
+    )
+    with serve_in_background() as (port, _):
+        _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            },
+        )
+    assert seen_auth_headers == [None]
+
+
+@respx.mock
+def test_hydrate_threads_concurrency_caps_at_5():
+    """20 URIs in input → mock observes at most 5 concurrent getPostThread calls."""
+    _mock_fetch_create_session()
+    in_flight = 0
+    max_in_flight = 0
+    lock = threading.Lock()
+
+    def capture(request):
+        nonlocal in_flight, max_in_flight
+        with lock:
+            in_flight += 1
+            if in_flight > max_in_flight:
+                max_in_flight = in_flight
+        import time
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+        return httpx.Response(
+            200,
+            json=_thread_view_post(request.url.params["uri"], "did:plc:x", "ok"),
+        )
+
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        side_effect=capture
+    )
+    uris = [f"at://did:plc:x/app.bsky.feed.post/{i:04d}" for i in range(20)]
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": uris,
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            },
+        )
+    assert status == 200
+    assert max_in_flight <= 5
+
+
+@respx.mock
+def test_hydrate_threads_invalid_uri_in_input():
+    _mock_fetch_create_session()
+    upstream = respx.get(
+        "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread"
+    ).mock(return_value=httpx.Response(200, json={}))
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["", 42, ""],
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["threaded"] == []
+    assert len(payload["errors"]) == 3
+    for err in payload["errors"]:
+        assert err["reason"] == "invalid at-uri"
+    assert not upstream.called
+
+
+def test_hydrate_threads_missing_credentials_returns_400():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={"uris": ["at://x/p/1"]},
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "missing credentials"}
+
+
+def test_hydrate_threads_missing_uris_returns_400():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "missing uris"}

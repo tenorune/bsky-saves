@@ -14,6 +14,8 @@ from __future__ import annotations
 import base64
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
 from urllib.parse import urlparse
@@ -32,6 +34,11 @@ from .fetch import (
 from .images import DEFAULT_USER_AGENT as _IMAGE_USER_AGENT
 from .images import TIMEOUT as _IMAGE_TIMEOUT
 from .normalize import normalise_record
+from .threads import (
+    fetch_thread,
+    collect_same_author_replies,
+    THREAD_SCHEMA_VERSION,
+)
 from .tid import rkey_of, decode_tid_to_iso
 
 
@@ -217,12 +224,75 @@ def _handle_enrich(handler) -> None:
     handler._send_json(200, {"enriched": enriched, "errors": errors})
 
 
+PUBLIC_APPVIEW = "https://public.api.bsky.app"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _handle_hydrate_threads(handler) -> None:
+    body = handler._read_json_body()
+    creds = _validate_creds((body or {}).get("credentials"))
+    if creds is None:
+        handler._send_json_error(400, "missing credentials")
+        return
+    uris = (body or {}).get("uris")
+    if not isinstance(uris, list):
+        handler._send_json_error(400, "missing uris")
+        return
+
+    # Validate credentials; we don't use the resulting JWT for upstream calls.
+    try:
+        create_session(creds["pds"], creds["handle"], creds["app_password"])
+    except httpx.HTTPStatusError as e:
+        handler._send_json_error(401, f"createSession failed: {e}")
+        return
+    except Exception as e:
+        handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
+        return
+
+    def fetch_one(uri: str) -> tuple[str, dict | None, str | None]:
+        thread, error = fetch_thread(uri, appview=PUBLIC_APPVIEW)
+        if thread is None:
+            return uri, None, error or "thread fetch failed"
+        post_author_did = ""
+        if isinstance(thread, dict):
+            post_author_did = (
+                thread.get("post", {}).get("author", {}).get("did", "")
+            )
+        replies = collect_same_author_replies(thread, post_author_did)
+        return uri, {
+            "uri": uri,
+            "thread_replies": replies,
+            "thread_schema_version": THREAD_SCHEMA_VERSION,
+            "thread_fetched_at": _now_iso(),
+        }, None
+
+    threaded: list[dict] = []
+    errors: list[dict] = []
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        for u in uris:
+            if not isinstance(u, str) or not u:
+                errors.append({"uri": u if isinstance(u, str) else "", "reason": "invalid at-uri"})
+                continue
+            _, entry, err = pool.submit(fetch_one, u).result()
+            if entry is not None:
+                threaded.append(entry)
+            else:
+                errors.append({"uri": u, "reason": err or "thread fetch failed"})
+
+    handler._send_json(200, {"threaded": threaded, "errors": errors})
+
+
 ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("GET", "/ping"): _handle_ping,
     ("POST", "/fetch-image"): _handle_fetch_image,
     ("POST", "/extract-article"): _handle_extract_article,
     ("POST", "/fetch"): _handle_fetch,
     ("POST", "/enrich"): _handle_enrich,
+    ("POST", "/hydrate-threads"): _handle_hydrate_threads,
 }
 
 
