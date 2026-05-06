@@ -1584,3 +1584,160 @@ def test_validate_creds_app_password_path_returns_variant_app_password():
     """Existing app-password tests pass; the new variant field is set correctly."""
     result = _validate_creds({"handle": "alice.bsky.social", "app_password": "xxxx"})
     assert result["variant"] == "app_password"
+
+
+# --- v0.4.1: JWT-pair credentials path on /hydrate-threads ---
+
+
+@respx.mock
+def test_hydrate_threads_jwt_path_skips_create_session():
+    """JWT path: daemon must NOT call createSession at all."""
+    create_session_route = respx.post(
+        f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
+    ).mock(return_value=httpx.Response(200, json={}))
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        return_value=httpx.Response(
+            200, json=_thread_view_post("at://x/p/1", "did:plc:x", "ok")
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {
+                    "access_jwt": "valid",
+                    "refresh_jwt": "valid",
+                    "did": "did:plc:abc",
+                },
+            },
+        )
+    assert status == 200
+    assert not create_session_route.called
+    payload = json.loads(body)
+    assert len(payload["threaded"]) == 1
+
+
+@respx.mock
+def test_hydrate_threads_jwt_path_uses_public_appview_unauthenticated():
+    """Under JWT path, the upstream getPostThread call has no Authorization header
+    (just like the app-password path)."""
+    seen_auth_headers: list[str | None] = []
+
+    def capture(request):
+        seen_auth_headers.append(request.headers.get("Authorization"))
+        return httpx.Response(
+            200, json=_thread_view_post("at://x/p/1", "did:plc:x", "ok")
+        )
+
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        side_effect=capture
+    )
+    with serve_in_background() as (port, _):
+        _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {
+                    "access_jwt": "the-access-jwt",
+                    "refresh_jwt": "the-refresh-jwt",
+                    "did": "did:plc:abc",
+                },
+            },
+        )
+    # No Authorization header on the upstream call (public AppView, anonymous).
+    assert seen_auth_headers == [None]
+
+
+@respx.mock
+def test_hydrate_threads_jwt_path_no_validation_bogus_jwt_accepted():
+    """JWT path: no JWT validation. A clearly-bogus JWT still goes through.
+    The endpoint's upstream call doesn't use the JWT, so this isn't an issue."""
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        return_value=httpx.Response(
+            200, json=_thread_view_post("at://x/p/1", "did:plc:x", "ok")
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {
+                    "access_jwt": "totally-bogus-not-a-real-jwt",
+                    "refresh_jwt": "also-bogus",
+                    "did": "did:plc:abc",
+                },
+            },
+        )
+    assert status == 200
+    assert len(json.loads(body)["threaded"]) == 1
+
+
+@respx.mock
+def test_hydrate_threads_jwt_path_no_rotated_credentials_in_response():
+    """/hydrate-threads never includes rotated_credentials (no upstream call
+    could trigger refresh)."""
+    respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
+        return_value=httpx.Response(
+            200, json=_thread_view_post("at://x/p/1", "did:plc:x", "ok")
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {
+                    "access_jwt": "valid",
+                    "refresh_jwt": "valid",
+                    "did": "did:plc:abc",
+                },
+            },
+        )
+    payload = json.loads(body)
+    assert "rotated_credentials" not in payload
+
+
+def test_hydrate_threads_jwt_missing_did_returns_400():
+    """JWT path requires did; without it, _validate_creds returns None →
+    400 missing credentials."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {
+                    "access_jwt": "x",
+                    "refresh_jwt": "y",
+                    # no did
+                },
+            },
+        )
+    assert status == 400
+
+
+def test_hydrate_threads_neither_password_nor_jwt_returns_400():
+    """If neither app_password nor access_jwt is present, return 400."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            body={
+                "uris": ["at://x/p/1"],
+                "credentials": {"handle": "alice.bsky.social"},
+            },
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "missing credentials"}

@@ -319,15 +319,20 @@ def _handle_hydrate_threads(handler) -> None:
         handler._send_json_error(400, "missing uris")
         return
 
-    # Validate credentials; we don't use the resulting JWT for upstream calls.
-    try:
-        create_session(creds["pds"], creds["handle"], creds["app_password"])
-    except httpx.HTTPStatusError as e:
-        handler._send_json_error(401, f"createSession failed: {e}")
-        return
-    except Exception as e:
-        handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
-        return
+    # App-password variant: validate via createSession (fail-fast on bad password).
+    # JWT variant: skip validation entirely. The endpoint's upstream call is to
+    # the public AppView unauthenticated; the JWT is unused. Spec § 6 (JWT-pair
+    # path) explicitly relaxes validation here — fail-fast under the JWT path
+    # would require a getSession round-trip we don't want to spend.
+    if creds["variant"] == "app_password":
+        try:
+            create_session(creds["pds"], creds["handle"], creds["app_password"])
+        except httpx.HTTPStatusError as e:
+            handler._send_json_error(401, f"createSession failed: {e}")
+            return
+        except Exception as e:
+            handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
+            return
 
     def fetch_one(uri: str) -> tuple[str, dict | None, str | None]:
         thread, error = fetch_thread(uri, appview=PUBLIC_APPVIEW)
