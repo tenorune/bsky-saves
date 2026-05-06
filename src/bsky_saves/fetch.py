@@ -29,6 +29,26 @@ from .normalize import merge_into_inventory, normalise_record
 EndpointParams = Callable[[str | None, str], dict]
 
 
+# Stable string aliases for BOOKMARK_ENDPOINTS entries — used by serve.py's
+# /fetch cursor encoding to remember which endpoint succeeded across paginated
+# calls without re-probing each page.
+ENDPOINT_IDS: dict[tuple[str, str], str] = {
+    ("pds", "app.bsky.bookmark.getBookmarks"): "pds:bookmark.getBookmarks",
+    ("appview", "app.bsky.bookmark.getBookmarks"): "appview:bookmark.getBookmarks",
+    ("appview", "app.bsky.feed.getActorBookmarks"): "appview:getActorBookmarks",
+    ("pds", "com.atproto.repo.listRecords"): "pds:listRecords",
+}
+
+
+class _DirectEndpointFailedError(Exception):
+    """Raised by fetch_one_page when the explicitly-named endpoint hard-fails.
+
+    serve.py's /fetch handler catches this to trigger a silent fallback re-probe.
+    Distinct from NoBookmarkEndpointError (which is raised after exhausting all
+    candidates during a probe).
+    """
+
+
 BOOKMARK_ENDPOINTS: list[tuple[str, str, EndpointParams]] = [
     (
         "pds",
@@ -308,3 +328,104 @@ def fetch_to_inventory(
         file=sys.stderr,
     )
     return len(merged["saves"])
+
+
+def fetch_one_page(
+    session: dict,
+    *,
+    pds_base: str,
+    appview_base: str,
+    endpoint_id: str | None = None,
+    cursor: str | None = None,
+    limit: int = 100,
+    user_agent: str | None = None,
+) -> tuple[str, list[dict], str | None]:
+    """Fetch ONE page of bookmarks. Returns (chosen_endpoint_id, raw_records, next_upstream_cursor).
+
+    If ``endpoint_id`` is None, probes BOOKMARK_ENDPOINTS in fallback order until
+    one succeeds for a single page; raises NoBookmarkEndpointError if all fail.
+
+    If ``endpoint_id`` is given, looks it up in ENDPOINT_IDS and calls that
+    endpoint directly with the given upstream cursor; raises
+    _DirectEndpointFailedError if the call hard-fails.
+
+    Used by serve.py's /fetch handler to expose pagination one page at a time
+    while remembering which endpoint succeeded inside the cursor.
+    """
+    pds_base = pds_base.rstrip("/")
+    appview_base = appview_base.rstrip("/")
+    pds_headers = {"Authorization": f"Bearer {session['accessJwt']}"}
+    if user_agent:
+        pds_headers["User-Agent"] = user_agent
+    did = session["did"]
+
+    # Build a list of candidate (host, method, params_factory, id) to try.
+    candidates: list[tuple[str, str, EndpointParams, str]] = []
+    if endpoint_id is None:
+        # Probe path: try each in fallback order.
+        for host, method, params_factory in BOOKMARK_ENDPOINTS:
+            eid = ENDPOINT_IDS[(host, method)]
+            candidates.append((host, method, params_factory, eid))
+    else:
+        # Direct path: look up the single endpoint by id.
+        for (host, method), eid in ENDPOINT_IDS.items():
+            if eid == endpoint_id:
+                # Find the matching factory in BOOKMARK_ENDPOINTS.
+                factory = next(
+                    f for h, m, f in BOOKMARK_ENDPOINTS if h == host and m == method
+                )
+                candidates = [(host, method, factory, eid)]
+                break
+        if not candidates:
+            raise _DirectEndpointFailedError(f"unknown endpoint_id: {endpoint_id}")
+
+    tried: list[str] = []
+    for host, method, params_factory, eid in candidates:
+        base = pds_base if host == "pds" else appview_base
+        # Service-auth handling — same logic as probe_bookmark_endpoints.
+        same_server = pds_base == appview_base
+        if host == "pds" or same_server:
+            headers = pds_headers
+        else:
+            try:
+                svc_token = get_service_auth(
+                    pds_base, session, "did:web:api.bsky.app", method
+                )
+                headers = {"Authorization": f"Bearer {svc_token}"}
+            except ServiceAuthError:
+                tried.append(f"{eid}:svc-auth-fail")
+                if endpoint_id is not None:
+                    raise _DirectEndpointFailedError("; ".join(tried))
+                continue
+
+        params = params_factory(cursor, did)
+        params["limit"] = limit
+        try:
+            r = httpx.get(
+                f"{base}/xrpc/{method}",
+                params=params,
+                headers=headers,
+                timeout=30.0,
+            )
+        except Exception as e:
+            tried.append(f"{eid}:{type(e).__name__}")
+            if endpoint_id is not None:
+                raise _DirectEndpointFailedError("; ".join(tried))
+            continue
+
+        if r.status_code in ENDPOINT_FAILURE_CODES:
+            tried.append(f"{eid}:{r.status_code}")
+            if endpoint_id is not None:
+                raise _DirectEndpointFailedError("; ".join(tried))
+            continue
+
+        # Success path.
+        r.raise_for_status()
+        data = r.json()
+        page = _records_from_response(data)
+        next_cursor = data.get("cursor")
+        return eid, page, (next_cursor or None)
+
+    raise NoBookmarkEndpointError(
+        "All bookmark endpoints failed: " + "; ".join(tried)
+    )
