@@ -492,3 +492,263 @@ def test_decode_cursor_returns_None_for_wrong_version():
         json.dumps({"v": 99, "endpoint": "pds:bookmark.getBookmarks", "upstream": "x"}).encode()
     ).decode()
     assert _decode_cursor(payload) is None
+
+
+# --- /fetch endpoint ---
+
+import httpx  # noqa: F811 (already imported above as _httpx_mod alias)
+from bsky_saves import fetch as _fetch_mod
+
+
+PDS_BASE_TEST = "https://bsky.social"
+
+
+def _mock_fetch_create_session(handle="alice.bsky.social", did="did:plc:abc"):
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "accessJwt": "fake-access",
+                "refreshJwt": "fake-refresh",
+                "did": did,
+                "handle": handle,
+            },
+        )
+    )
+
+
+def _bookmark_record_for_fetch(uri: str, saved_at: str = "2026-04-12T18:31:00Z") -> dict:
+    return {
+        "subject": {"uri": uri},
+        "createdAt": saved_at,
+        "item": {
+            "uri": uri,
+            "indexedAt": saved_at,
+            "record": {"text": "post body"},
+            "author": {"handle": "x.bsky.social", "displayName": "X", "did": "did:plc:x"},
+        },
+    }
+
+
+@respx.mock
+def test_fetch_first_page_probes_and_returns_cursor():
+    _mock_fetch_create_session()
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "bookmarks": [_bookmark_record_for_fetch("at://x/p/1")],
+                "cursor": "upstream-cursor-page-2",
+            },
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["saves"]) == 1
+    assert payload["saves"][0]["uri"] == "at://x/p/1"
+    assert payload["cursor"] is not None
+    decoded = _decode_cursor(payload["cursor"])
+    assert decoded["endpoint"] == "pds:bookmark.getBookmarks"
+    assert decoded["upstream"] == "upstream-cursor-page-2"
+
+
+@respx.mock
+def test_fetch_continuation_skips_probe_via_cursor():
+    """Continuation cursor names a specific endpoint; daemon calls only that one."""
+    _mock_fetch_create_session()
+    pds_route = respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/2")]},
+        )
+    )
+    appview_route = respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.feed.getActorBookmarks").mock(
+        return_value=httpx.Response(404, json={"error": "should-not-be-called"})
+    )
+    cursor = _encode_cursor("pds:bookmark.getBookmarks", "upstream-cursor-page-2")
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+                "cursor": cursor,
+            },
+        )
+    assert status == 200
+    assert pds_route.called
+    assert not appview_route.called
+
+
+@respx.mock
+def test_fetch_response_shape_matches_normalise_record():
+    """Each saves[] entry has the exact field set produced by normalise_record."""
+    _mock_fetch_create_session()
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/1")]},
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
+        )
+    assert status == 200
+    entry = json.loads(body)["saves"][0]
+    assert set(entry.keys()) >= {"uri", "saved_at", "post_text", "embed", "author", "images"}
+    assert entry["author"]["handle"] == "x.bsky.social"
+    assert entry["author"]["display_name"] == "X"
+    assert entry["author"]["did"] == "did:plc:x"
+
+
+def test_fetch_invalid_cursor_returns_400():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+                "cursor": "not-a-valid-base64-cursor!!!",
+            },
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "invalid cursor"}
+
+
+def test_fetch_missing_credentials_returns_400():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(port, "/fetch", method="POST", body={})
+    assert status == 400
+    assert json.loads(body) == {"error": "missing credentials"}
+
+
+@respx.mock
+def test_fetch_pds_defaults_to_bsky_social_when_omitted():
+    """Credentials without `pds` → daemon calls createSession against bsky.social."""
+    create_session_route = respx.post(
+        f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
+    ).mock(
+        return_value=httpx.Response(
+            200,
+            json={"accessJwt": "x", "refreshJwt": "y", "did": "did:plc:x", "handle": "alice.bsky.social"},
+        )
+    )
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(200, json={"bookmarks": []})
+    )
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
+        )
+    assert status == 200
+    assert create_session_route.called
+
+
+@respx.mock
+def test_fetch_createsession_failure_returns_401():
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession").mock(
+        return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "wrong"}},
+        )
+    assert status == 401
+    payload = json.loads(body)
+    assert "error" in payload
+    assert "createSession failed" in payload["error"]
+
+
+@respx.mock
+def test_fetch_silent_fallback_on_endpoint_failure():
+    """Continuation with a wrapped cursor whose named endpoint returns 5xx →
+    daemon re-probes (cursor dropped) and returns next page from new winner."""
+    _mock_fetch_create_session()
+    cursor = _encode_cursor("pds:bookmark.getBookmarks", "upstream-x")
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(500, json={"error": "ServerError"}),
+            httpx.Response(
+                200,
+                json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/fallback")]},
+            ),
+        ]
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+                "cursor": cursor,
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["saves"]) == 1
+    assert payload["saves"][0]["uri"] == "at://x/p/fallback"
+
+
+@respx.mock
+def test_fetch_no_more_pages_returns_null_cursor():
+    _mock_fetch_create_session()
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/1")]},
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
+        )
+    assert status == 200
+    assert json.loads(body)["cursor"] is None
+
+
+@respx.mock
+def test_fetch_limit_clamping():
+    """limit: 999 clamped to 100; limit: 0 clamped to 1."""
+    _mock_fetch_create_session()
+    seen_limits: list[int] = []
+
+    def capture(request):
+        seen_limits.append(int(request.url.params.get("limit", "0")))
+        return httpx.Response(200, json={"bookmarks": []})
+
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=capture
+    )
+    with serve_in_background() as (port, _):
+        _request(port, "/fetch", method="POST", body={
+            "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            "limit": 999,
+        })
+        _request(port, "/fetch", method="POST", body={
+            "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+            "limit": 0,
+        })
+    assert seen_limits == [100, 1]

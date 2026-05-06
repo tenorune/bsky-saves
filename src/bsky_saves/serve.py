@@ -22,9 +22,16 @@ import httpx
 
 from . import __version__
 from .articles import _extract_article
-from .fetch import ENDPOINT_IDS
+from .auth import create_session
+from .fetch import (
+    ENDPOINT_IDS,
+    fetch_one_page,
+    NoBookmarkEndpointError,
+    _DirectEndpointFailedError,
+)
 from .images import DEFAULT_USER_AGENT as _IMAGE_USER_AGENT
 from .images import TIMEOUT as _IMAGE_TIMEOUT
+from .normalize import normalise_record
 
 
 def _handle_ping(handler) -> None:
@@ -115,10 +122,79 @@ def _handle_extract_article(handler) -> None:
     handler._send_json(200, payload)
 
 
+def _handle_fetch(handler) -> None:
+    body = handler._read_json_body()
+    creds = _validate_creds((body or {}).get("credentials"))
+    if creds is None:
+        handler._send_json_error(400, "missing credentials")
+        return
+
+    raw_cursor = (body or {}).get("cursor")
+    raw_limit = (body or {}).get("limit", 100)
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        limit = 100
+    limit = max(1, min(limit, 100))
+
+    if raw_cursor is None:
+        endpoint_id, upstream_cursor = None, None
+    else:
+        decoded = _decode_cursor(raw_cursor)
+        if decoded is None:
+            handler._send_json_error(400, "invalid cursor")
+            return
+        endpoint_id, upstream_cursor = decoded["endpoint"], decoded["upstream"]
+
+    try:
+        session = create_session(
+            creds["pds"], creds["handle"], creds["app_password"]
+        )
+    except httpx.HTTPStatusError as e:
+        handler._send_json_error(401, f"createSession failed: {e}")
+        return
+    except Exception as e:
+        handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
+        return
+
+    try:
+        chosen_id, raw, next_upstream = fetch_one_page(
+            session,
+            pds_base=creds["pds"],
+            appview_base=APPVIEW_BASE,
+            endpoint_id=endpoint_id,
+            cursor=upstream_cursor,
+            limit=limit,
+        )
+    except _DirectEndpointFailedError:
+        # Silent fallback: re-probe from a fresh state. Drop the upstream cursor
+        # because the four bookmark endpoints have incompatible cursor formats.
+        try:
+            chosen_id, raw, next_upstream = fetch_one_page(
+                session,
+                pds_base=creds["pds"],
+                appview_base=APPVIEW_BASE,
+                endpoint_id=None,
+                cursor=None,
+                limit=limit,
+            )
+        except NoBookmarkEndpointError as e:
+            handler._send_json_error(502, f"no working bookmark endpoint: {e}")
+            return
+    except NoBookmarkEndpointError as e:
+        handler._send_json_error(502, f"no working bookmark endpoint: {e}")
+        return
+
+    saves = [normalise_record(r) for r in raw]
+    out_cursor = _encode_cursor(chosen_id, next_upstream) if next_upstream else None
+    handler._send_json(200, {"saves": saves, "cursor": out_cursor})
+
+
 ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("GET", "/ping"): _handle_ping,
     ("POST", "/fetch-image"): _handle_fetch_image,
     ("POST", "/extract-article"): _handle_extract_article,
+    ("POST", "/fetch"): _handle_fetch,
 }
 
 
@@ -129,6 +205,7 @@ class _HandlerLike:
 
 
 DEFAULT_PDS = "https://bsky.social"
+APPVIEW_BASE = "https://bsky.social"
 
 
 def _validate_creds(creds: object) -> dict | None:
