@@ -271,13 +271,20 @@ def _handle_hydrate_threads(handler) -> None:
 
     threaded: list[dict] = []
     errors: list[dict] = []
+    scheduled: list[tuple[str, object]] = []  # (uri, Future-or-"invalid")
 
     with ThreadPoolExecutor(max_workers=5) as pool:
         for u in uris:
-            if not isinstance(u, str) or not u:
-                errors.append({"uri": u if isinstance(u, str) else "", "reason": "invalid at-uri"})
+            if isinstance(u, str) and u:
+                scheduled.append((u, pool.submit(fetch_one, u)))
+            else:
+                scheduled.append((u if isinstance(u, str) else "", "invalid"))
+
+        for u, fut_or_marker in scheduled:
+            if fut_or_marker == "invalid":
+                errors.append({"uri": u, "reason": "invalid at-uri"})
                 continue
-            _, entry, err = pool.submit(fetch_one, u).result()
+            _, entry, err = fut_or_marker.result()
             if entry is not None:
                 threaded.append(entry)
             else:

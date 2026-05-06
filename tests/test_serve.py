@@ -969,15 +969,20 @@ def test_hydrate_threads_thread_replies_uses_v4_chain_logic():
 
 @respx.mock
 def test_hydrate_threads_per_uri_failure_lands_in_errors_with_diagnostic():
+    """Concurrent execution means side_effect-list ordering is non-deterministic;
+    use a URL-keyed mock that responds based on the requested ?uri= param."""
     _mock_fetch_create_session()
+
+    def respond_by_uri(request):
+        target = request.url.params.get("uri", "")
+        if target == "at://x/p/1":
+            return httpx.Response(404, json={"error": "NotFound"})
+        return httpx.Response(
+            200, json=_thread_view_post(target, "did:plc:x", "ok")
+        )
+
     respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
-        side_effect=[
-            httpx.Response(404, json={"error": "NotFound"}),
-            httpx.Response(
-                200,
-                json=_thread_view_post("at://x/p/2", "did:plc:x", "ok"),
-            ),
-        ]
+        side_effect=respond_by_uri
     )
     with serve_in_background() as (port, _):
         status, _, body = _request(
