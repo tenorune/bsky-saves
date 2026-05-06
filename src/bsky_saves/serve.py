@@ -48,7 +48,7 @@ def _handle_ping(handler) -> None:
         {
             "name": "bsky-saves",
             "version": __version__,
-            "features": ["fetch-image", "extract-article"],
+            "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads"],
         },
     )
 

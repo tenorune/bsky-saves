@@ -84,7 +84,7 @@ def test_ping_returns_name_version_features():
     assert payload == {
         "name": "bsky-saves",
         "version": __version__,
-        "features": ["fetch-image", "extract-article"],
+        "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads"],
     }
 
 
