@@ -415,6 +415,7 @@ from bsky_saves.serve import _validate_creds, _encode_cursor, _decode_cursor
 def test_validate_creds_returns_dict_with_pds_default_when_pds_omitted():
     result = _validate_creds({"handle": "alice.bsky.social", "app_password": "xxxx"})
     assert result == {
+        "variant": "app_password",
         "handle": "alice.bsky.social",
         "app_password": "xxxx",
         "pds": "https://bsky.social",
@@ -1171,3 +1172,415 @@ def test_hydrate_threads_missing_uris_returns_400():
         )
     assert status == 400
     assert json.loads(body) == {"error": "missing uris"}
+
+
+# --- v0.4.1: JWT-pair credentials path on /fetch ---
+
+
+@respx.mock
+def test_fetch_jwt_path_happy_no_refresh():
+    """Valid JWT pair, accessJwt still good — no refresh, no rotated_credentials."""
+    # NOTE: NO _mock_fetch_create_session — JWT path skips createSession.
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/1")]},
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "valid-access",
+                    "refresh_jwt": "valid-refresh",
+                    "did": "did:plc:abc",
+                },
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["saves"]) == 1
+    assert "rotated_credentials" not in payload
+
+
+@respx.mock
+def test_fetch_jwt_path_skips_createsession():
+    """With a JWT pair, the daemon must NOT call createSession at all."""
+    create_session_route = respx.post(
+        f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
+    ).mock(return_value=httpx.Response(200, json={}))
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(200, json={"bookmarks": []})
+    )
+    with serve_in_background() as (port, _):
+        _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "v",
+                    "refresh_jwt": "r",
+                    "did": "did:plc:x",
+                },
+            },
+        )
+    assert not create_session_route.called
+
+
+@respx.mock
+def test_fetch_jwt_path_uses_access_jwt_as_bearer():
+    """Daemon sends access_jwt as the Bearer token on the upstream call."""
+    seen_auth: list[str] = []
+
+    def capture(request):
+        seen_auth.append(request.headers.get("Authorization", ""))
+        return httpx.Response(200, json={"bookmarks": []})
+
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=capture
+    )
+    with serve_in_background() as (port, _):
+        _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "the-access-jwt",
+                    "refresh_jwt": "the-refresh-jwt",
+                    "did": "did:plc:x",
+                },
+            },
+        )
+    assert seen_auth == ["Bearer the-access-jwt"]
+
+
+@respx.mock
+def test_fetch_jwt_path_refresh_on_401_returns_rotated_credentials():
+    """Direct-path: cursor-bearing call → endpoint returns 401 → daemon
+    refreshes and retries with rotated tokens, returns rotated_credentials."""
+    # bookmark.getBookmarks: first call (with old token) → 401, second call → 200.
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(401, json={"error": "ExpiredToken"}),
+            httpx.Response(
+                200,
+                json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/1")]},
+            ),
+        ]
+    )
+    # refreshSession returns new pair.
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.refreshSession").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "accessJwt": "new-access",
+                "refreshJwt": "new-refresh",
+                "did": "did:plc:abc",
+                "handle": "alice.bsky.social",
+            },
+        )
+    )
+
+    cursor = _encode_cursor("pds:bookmark.getBookmarks", "upstream-x")
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "expired-access",
+                    "refresh_jwt": "valid-refresh",
+                    "did": "did:plc:abc",
+                },
+                "cursor": cursor,
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["saves"]) == 1
+    assert payload["rotated_credentials"] == {
+        "access_jwt": "new-access",
+        "refresh_jwt": "new-refresh",
+        "did": "did:plc:abc",
+    }
+
+
+@respx.mock
+def test_fetch_jwt_path_refresh_failure_returns_401_refresh_failed():
+    """When refreshSession itself fails, return 401 with code: refresh_failed."""
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(401, json={"error": "ExpiredToken"})
+    )
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.refreshSession").mock(
+        return_value=httpx.Response(400, json={"error": "ExpiredToken"})
+    )
+    cursor = _encode_cursor("pds:bookmark.getBookmarks", "upstream-x")
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "expired",
+                    "refresh_jwt": "also-expired",
+                    "did": "did:plc:abc",
+                },
+                "cursor": cursor,
+            },
+        )
+    assert status == 401
+    payload = json.loads(body)
+    assert payload["error"] == "auth refresh failed"
+    assert payload["code"] == "refresh_failed"
+
+
+@respx.mock
+def test_fetch_jwt_path_persistent_401_after_refresh():
+    """Refresh succeeds but retry still gets 401 → upstream_rejected_after_refresh."""
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
+    )
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.refreshSession").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "accessJwt": "new-access",
+                "refreshJwt": "new-refresh",
+                "did": "did:plc:abc",
+                "handle": "alice.bsky.social",
+            },
+        )
+    )
+    cursor = _encode_cursor("pds:bookmark.getBookmarks", "upstream-x")
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "expired",
+                    "refresh_jwt": "valid-refresh",
+                    "did": "did:plc:abc",
+                },
+                "cursor": cursor,
+            },
+        )
+    assert status == 401
+    payload = json.loads(body)
+    assert payload["error"] == "auth refresh failed"
+    assert payload["code"] == "upstream_rejected_after_refresh"
+
+
+@respx.mock
+def test_fetch_jwt_path_non_401_failure_no_refresh():
+    """Non-401 direct failure (e.g. 500) triggers silent fallback, NOT refresh.
+    refreshSession should not be called at all."""
+    refresh_route = respx.post(
+        f"{PDS_BASE_TEST}/xrpc/com.atproto.server.refreshSession"
+    ).mock(return_value=httpx.Response(200, json={}))
+    # Named endpoint returns 500; fallback re-probe (cursor=None) succeeds via
+    # the same endpoint URL on the next call.
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(500, json={"error": "ServerError"}),  # direct call fails
+            httpx.Response(  # re-probe call succeeds
+                200,
+                json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/fallback")]},
+            ),
+        ]
+    )
+    cursor = _encode_cursor("pds:bookmark.getBookmarks", "upstream-x")
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "valid",
+                    "refresh_jwt": "valid-refresh",
+                    "did": "did:plc:abc",
+                },
+                "cursor": cursor,
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["saves"]) == 1
+    assert payload["saves"][0]["uri"] == "at://x/p/fallback"
+    assert "rotated_credentials" not in payload  # no refresh happened
+    assert not refresh_route.called
+
+
+@respx.mock
+def test_fetch_jwt_path_probe_all_401_triggers_refresh():
+    """First-call probe (cursor=None) — all 4 endpoints return 401 → refresh.
+    PDS_BASE_TEST == APPVIEW_BASE_TEST in this fixture, so the same URL serves
+    both PDS and AppView calls; we use side_effect to advance through them."""
+    # bookmark.getBookmarks: pds (401), then post-refresh retry (200).
+    # Plus appview:bookmark.getBookmarks (same URL): also 401 in the initial probe.
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        side_effect=[
+            httpx.Response(401, json={"error": "ExpiredToken"}),  # pds
+            httpx.Response(401, json={"error": "ExpiredToken"}),  # appview (same URL)
+            httpx.Response(  # post-refresh retry probe — pds works
+                200,
+                json={"bookmarks": [_bookmark_record_for_fetch("at://x/p/post-refresh")]},
+            ),
+        ]
+    )
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.feed.getActorBookmarks").mock(
+        return_value=httpx.Response(401, json={"error": "ExpiredToken"})
+    )
+    respx.get(f"{PDS_BASE_TEST}/xrpc/com.atproto.repo.listRecords").mock(
+        return_value=httpx.Response(401, json={"error": "ExpiredToken"})
+    )
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.refreshSession").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "accessJwt": "new",
+                "refreshJwt": "new-r",
+                "did": "did:plc:abc",
+                "handle": "alice.bsky.social",
+            },
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "expired",
+                    "refresh_jwt": "valid",
+                    "did": "did:plc:abc",
+                },
+            },
+        )
+    assert status == 200
+    payload = json.loads(body)
+    assert len(payload["saves"]) == 1
+    assert payload["saves"][0]["uri"] == "at://x/p/post-refresh"
+    assert "rotated_credentials" in payload
+
+
+@respx.mock
+def test_fetch_jwt_path_probe_all_non_401_no_refresh():
+    """First-call probe — all endpoints return non-401 (e.g. 500/404).
+    No refresh attempted; return 502."""
+    refresh_route = respx.post(
+        f"{PDS_BASE_TEST}/xrpc/com.atproto.server.refreshSession"
+    ).mock(return_value=httpx.Response(200, json={}))
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(500, json={"error": "ServerError"})
+    )
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.feed.getActorBookmarks").mock(
+        return_value=httpx.Response(500, json={"error": "ServerError"})
+    )
+    respx.get(f"{PDS_BASE_TEST}/xrpc/com.atproto.repo.listRecords").mock(
+        return_value=httpx.Response(500, json={"error": "ServerError"})
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "valid",
+                    "refresh_jwt": "valid",
+                    "did": "did:plc:abc",
+                },
+            },
+        )
+    assert status == 502
+    assert not refresh_route.called
+
+
+def test_fetch_missing_both_password_and_jwt_returns_400():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social"}},  # no app_password, no access_jwt
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "missing credentials"}
+
+
+def test_fetch_jwt_missing_did_returns_400():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={
+                "credentials": {
+                    "access_jwt": "x",
+                    "refresh_jwt": "y",
+                    # no did
+                }
+            },
+        )
+    assert status == 400
+
+
+# --- v0.4.1: _validate_creds direct unit tests ---
+
+
+def test_validate_creds_jwt_path_returns_variant_jwt():
+    result = _validate_creds({
+        "access_jwt": "a",
+        "refresh_jwt": "r",
+        "did": "did:plc:x",
+    })
+    assert result is not None
+    assert result["variant"] == "jwt"
+    assert result["pds"] == "https://bsky.social"
+
+
+def test_validate_creds_jwt_path_with_explicit_pds():
+    result = _validate_creds({
+        "access_jwt": "a",
+        "refresh_jwt": "r",
+        "did": "did:plc:x",
+        "pds": "https://eurosky.social",
+    })
+    assert result["pds"] == "https://eurosky.social"
+
+
+def test_validate_creds_jwt_path_missing_refresh_jwt_returns_None():
+    assert _validate_creds({"access_jwt": "a", "did": "did:plc:x"}) is None
+
+
+def test_validate_creds_jwt_path_missing_did_returns_None():
+    assert _validate_creds({"access_jwt": "a", "refresh_jwt": "r"}) is None
+
+
+def test_validate_creds_app_password_takes_priority_when_both_present():
+    """If both app_password and access_jwt are sent, app_password wins."""
+    result = _validate_creds({
+        "handle": "alice.bsky.social",
+        "app_password": "xxxx",
+        "access_jwt": "a",
+        "refresh_jwt": "r",
+        "did": "did:plc:x",
+    })
+    assert result["variant"] == "app_password"
+
+
+def test_validate_creds_app_password_path_returns_variant_app_password():
+    """Existing app-password tests pass; the new variant field is set correctly."""
+    result = _validate_creds({"handle": "alice.bsky.social", "app_password": "xxxx"})
+    assert result["variant"] == "app_password"

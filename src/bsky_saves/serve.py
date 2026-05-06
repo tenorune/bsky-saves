@@ -24,7 +24,7 @@ import httpx
 
 from . import __version__
 from .articles import _extract_article
-from .auth import create_session
+from .auth import create_session, refresh_session
 from .fetch import (
     ENDPOINT_IDS,
     fetch_one_page,
@@ -154,48 +154,125 @@ def _handle_fetch(handler) -> None:
             return
         endpoint_id, upstream_cursor = decoded["endpoint"], decoded["upstream"]
 
-    try:
-        session = create_session(
-            creds["pds"], creds["handle"], creds["app_password"]
-        )
-    except httpx.HTTPStatusError as e:
-        handler._send_json_error(401, f"createSession failed: {e}")
-        return
-    except Exception as e:
-        handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
-        return
+    # Build the session dict per credential variant.
+    if creds["variant"] == "app_password":
+        try:
+            session = create_session(
+                creds["pds"], creds["handle"], creds["app_password"]
+            )
+        except httpx.HTTPStatusError as e:
+            handler._send_json_error(401, f"createSession failed: {e}")
+            return
+        except Exception as e:
+            handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
+            return
+    else:  # jwt variant
+        session = {
+            "accessJwt": creds["access_jwt"],
+            "refreshJwt": creds["refresh_jwt"],
+            "did": creds["did"],
+            "handle": "",
+        }
 
-    try:
-        chosen_id, raw, next_upstream = fetch_one_page(
-            session,
+    rotated_credentials: dict | None = None
+
+    def call_fetch_one_page(use_session: dict, eid: str | None, cur: str | None):
+        return fetch_one_page(
+            use_session,
             pds_base=creds["pds"],
             appview_base=APPVIEW_BASE,
-            endpoint_id=endpoint_id,
-            cursor=upstream_cursor,
+            endpoint_id=eid,
+            cursor=cur,
             limit=limit,
         )
-    except _DirectEndpointFailedError:
-        # Silent fallback: re-probe from a fresh state. Drop the upstream cursor
-        # because the four bookmark endpoints have incompatible cursor formats.
-        try:
-            chosen_id, raw, next_upstream = fetch_one_page(
-                session,
-                pds_base=creds["pds"],
-                appview_base=APPVIEW_BASE,
-                endpoint_id=None,
-                cursor=None,
-                limit=limit,
-            )
-        except NoBookmarkEndpointError as e:
-            handler._send_json_error(502, f"no working bookmark endpoint: {e}")
-            return
+
+    try:
+        chosen_id, raw, next_upstream = call_fetch_one_page(
+            session, endpoint_id, upstream_cursor
+        )
+    except _DirectEndpointFailedError as e:
+        # Direct named-endpoint failure.
+        if creds["variant"] == "jwt" and e.status_code == 401:
+            # Refresh + retry on the same endpoint with the same cursor.
+            try:
+                new_session = refresh_session(creds["pds"], session["refreshJwt"])
+            except Exception:
+                handler._send_json_error(
+                    401,
+                    "auth refresh failed",
+                    extra={"code": "refresh_failed"},
+                )
+                return
+            rotated_credentials = {
+                "access_jwt": new_session["accessJwt"],
+                "refresh_jwt": new_session["refreshJwt"],
+                "did": new_session["did"],
+            }
+            try:
+                chosen_id, raw, next_upstream = call_fetch_one_page(
+                    new_session, endpoint_id, upstream_cursor
+                )
+            except (_DirectEndpointFailedError, NoBookmarkEndpointError):
+                handler._send_json_error(
+                    401,
+                    "auth refresh failed",
+                    extra={"code": "upstream_rejected_after_refresh"},
+                )
+                return
+        else:
+            # Non-401 direct failure (or app-password path): silent fallback
+            # re-probe with the cursor dropped (per spec — endpoint cursor
+            # formats are incompatible). No refresh attempted.
+            try:
+                chosen_id, raw, next_upstream = call_fetch_one_page(
+                    session, None, None
+                )
+            except NoBookmarkEndpointError as ee:
+                handler._send_json_error(
+                    502, f"no working bookmark endpoint: {ee}"
+                )
+                return
     except NoBookmarkEndpointError as e:
-        handler._send_json_error(502, f"no working bookmark endpoint: {e}")
-        return
+        # Probe failure (first call with cursor=None had no working endpoint).
+        if creds["variant"] == "jwt" and 401 in e.status_codes:
+            # At least one endpoint returned 401 — likely access_jwt expired.
+            try:
+                new_session = refresh_session(creds["pds"], session["refreshJwt"])
+            except Exception:
+                handler._send_json_error(
+                    401,
+                    "auth refresh failed",
+                    extra={"code": "refresh_failed"},
+                )
+                return
+            rotated_credentials = {
+                "access_jwt": new_session["accessJwt"],
+                "refresh_jwt": new_session["refreshJwt"],
+                "did": new_session["did"],
+            }
+            try:
+                chosen_id, raw, next_upstream = call_fetch_one_page(
+                    new_session, None, None
+                )
+            except (NoBookmarkEndpointError, _DirectEndpointFailedError):
+                handler._send_json_error(
+                    401,
+                    "auth refresh failed",
+                    extra={"code": "upstream_rejected_after_refresh"},
+                )
+                return
+        else:
+            handler._send_json_error(
+                502, f"no working bookmark endpoint: {e}"
+            )
+            return
 
     saves = [normalise_record(r) for r in raw]
     out_cursor = _encode_cursor(chosen_id, next_upstream) if next_upstream else None
-    handler._send_json(200, {"saves": saves, "cursor": out_cursor})
+    response: dict = {"saves": saves, "cursor": out_cursor}
+    if rotated_credentials is not None:
+        response["rotated_credentials"] = rotated_credentials
+    handler._send_json(200, response)
 
 
 def _handle_enrich(handler) -> None:
@@ -316,24 +393,66 @@ APPVIEW_BASE = "https://bsky.social"
 def _validate_creds(creds: object) -> dict | None:
     """Validate a credentials dict from a request body.
 
-    Required fields: handle, app_password (both must be non-empty strings).
-    Optional field: pds (defaults to "https://bsky.social" when absent or empty).
+    Two accepted shapes (detected by which fields are present):
 
-    Returns a normalized dict with all three fields populated, or None if
-    required fields are missing / wrong type.
+    - **App-password** (v0.4.0+): requires `handle` and `app_password` (both
+      non-empty strings). Optional `pds` defaults to `https://bsky.social`
+      when absent or empty. Daemon will call `createSession` per request.
+
+    - **JWT-pair** (v0.4.1+): requires `access_jwt`, `refresh_jwt`, and `did`
+      (all non-empty strings). Optional `pds` defaults to `https://bsky.social`.
+      Daemon skips `createSession` and uses the tokens directly. The `did`
+      field is treated as opaque — no JWT decoding, no `sub`-claim verification.
+
+    Detection priority: `app_password` present → app-password path. Else
+    `access_jwt` present → JWT path. Else returns None.
+
+    Returns a normalized dict with a `variant` field set to either
+    "app_password" or "jwt", plus the credential fields and pds. Returns
+    None when required fields are missing or wrong type.
     """
     if not isinstance(creds, dict):
         return None
-    handle = creds.get("handle")
-    app_password = creds.get("app_password")
-    if not isinstance(handle, str) or not handle:
-        return None
-    if not isinstance(app_password, str) or not app_password:
-        return None
+
     pds = creds.get("pds")
     if not isinstance(pds, str) or not pds:
         pds = DEFAULT_PDS
-    return {"handle": handle, "app_password": app_password, "pds": pds}
+
+    # App-password path takes priority when app_password is present.
+    if creds.get("app_password") is not None:
+        handle = creds.get("handle")
+        app_password = creds.get("app_password")
+        if not isinstance(handle, str) or not handle:
+            return None
+        if not isinstance(app_password, str) or not app_password:
+            return None
+        return {
+            "variant": "app_password",
+            "handle": handle,
+            "app_password": app_password,
+            "pds": pds,
+        }
+
+    # JWT-pair path.
+    if creds.get("access_jwt") is not None:
+        access_jwt = creds.get("access_jwt")
+        refresh_jwt = creds.get("refresh_jwt")
+        did = creds.get("did")
+        if not isinstance(access_jwt, str) or not access_jwt:
+            return None
+        if not isinstance(refresh_jwt, str) or not refresh_jwt:
+            return None
+        if not isinstance(did, str) or not did:
+            return None
+        return {
+            "variant": "jwt",
+            "access_jwt": access_jwt,
+            "refresh_jwt": refresh_jwt,
+            "did": did,
+            "pds": pds,
+        }
+
+    return None
 
 
 def _encode_cursor(endpoint_id: str, upstream_cursor: str | None) -> str:
@@ -417,8 +536,11 @@ def make_handler(
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_json_error(self, code: int, error: str) -> None:
-            self._send_json(code, {"error": error})
+        def _send_json_error(self, code: int, error: str, *, extra: dict | None = None) -> None:
+            payload: dict = {"error": error}
+            if extra:
+                payload.update(extra)
+            self._send_json(code, payload)
 
         def _send_bytes(
             self,
