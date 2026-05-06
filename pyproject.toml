@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bsky-saves"
-version = "0.3.0"
+version = "0.3.1"
 description = "BlueSky bookmarks ingestion toolkit: fetch, hydrate (article text, self-thread context, images), and merge into a JSON inventory."
 readme = "README.md"
 license = { file = "LICENSE" }

@@ -30,7 +30,10 @@ from .normalize import extract_media
 #   v1 — initial: {uri, indexedAt, text}
 #   v2 — added images
 #   v3 — also walks the thread of a save's quoted_post
-THREAD_SCHEMA_VERSION = 3
+#   v4 — collect_same_author_replies tightened to only include posts that
+#        form an unbroken same-author chain from the root, excluding the
+#        OP's responses to other people's comments
+THREAD_SCHEMA_VERSION = 4
 
 DEFAULT_APPVIEW = "https://public.api.bsky.app"
 DEFAULT_USER_AGENT = (
@@ -67,19 +70,31 @@ def fetch_thread(
 
 
 def collect_same_author_replies(thread: dict, author_did: str) -> list[dict]:
-    """Walk the thread tree depth-first, returning posts whose author DID
-    matches ``author_did``. Each reply has its embedded media extracted."""
+    """Walk the thread tree depth-first, returning posts that form an
+    unbroken same-author chain from the root.
+
+    Includes posts authored by ``author_did`` whose direct parent in the
+    thread tree is also authored by ``author_did`` (transitively up to the
+    root). Excludes posts where the chain has been broken by a different
+    author — typically the OP's responses to other people's comments. The
+    walker stops descending once a different-author post is encountered, so
+    same-author posts nested inside someone else's reply are not collected
+    either.
+
+    Each collected post has its embedded media extracted via extract_media.
+    """
     out: list[dict] = []
     seen_uris: set[str] = set()
 
-    def visit(node):
+    def visit(node, in_chain: bool):
         if not isinstance(node, dict):
             return
         for reply in node.get("replies", []) or []:
             post = (reply or {}).get("post") or {}
             author = post.get("author", {})
             uri = post.get("uri", "")
-            if author.get("did") == author_did and uri and uri not in seen_uris:
+            is_same_author = author.get("did") == author_did
+            if in_chain and is_same_author and uri and uri not in seen_uris:
                 record = post.get("record", {}) or {}
                 embed_view = post.get("embed") or {}
                 out.append(
@@ -91,9 +106,14 @@ def collect_same_author_replies(thread: dict, author_did: str) -> list[dict]:
                     }
                 )
                 seen_uris.add(uri)
-            visit(reply)
+                visit(reply, in_chain=True)
+            # If the chain is broken at this reply (different author, or a
+            # parent already had a different author), do NOT recurse — any
+            # same-author posts below are not self-thread continuations.
 
-    visit(thread)
+    # The root is the bookmarked post by `author_did`, so its direct
+    # children's parent-author IS author_did → start with in_chain=True.
+    visit(thread, in_chain=True)
     return out
 
 
