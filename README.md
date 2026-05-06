@@ -68,22 +68,39 @@ entries and adds only what's new. Failures are recorded inline (e.g.
 
 `bsky-saves serve` runs a small HTTP helper daemon on `127.0.0.1` that
 [bsky-saves-gui](https://github.com/tenorune/bsky-saves-gui) — a static web
-app running `bsky-saves` in Pyodide — calls to fetch image bytes and extract
-article text. Both operations are blocked by CORS in the browser; the helper
-runs on the user's own machine so the actual outbound HTTP happens locally.
+app running `bsky-saves` in Pyodide — calls to offload operations the
+browser can't do directly: fetching image bytes and arbitrary article URLs
+(both blocked by CORS), and routing bookmark enumeration, enrichment, and
+thread hydration through the helper instead of running them in Pyodide.
 
 ```
 bsky-saves serve [--port 47826] [--allow-origin https://saves.lightseed.net]... [--verbose]
 ```
 
-The daemon exposes three endpoints (`GET /ping`, `POST /fetch-image`,
-`POST /extract-article`), binds only to `127.0.0.1`, requires no
-authentication or credentials, writes nothing to disk, and reads no
-config files. It's a stateless passthrough that exists for the duration
-of the `serve` invocation.
+The daemon binds only to `127.0.0.1`, writes nothing to disk, reads no
+config files, and exposes six endpoints:
 
-The full HTTP API contract lives in the consumer-side requirements doc:
-[`bsky-saves-gui/docs/bsky-saves-serve-requirements.md`](https://github.com/tenorune/bsky-saves-gui/blob/main/docs/bsky-saves-serve-requirements.md).
+| Endpoint | Credentials | Purpose |
+|---|---|---|
+| `GET /ping` | — | Health check; advertises supported endpoints in a `features` array |
+| `POST /fetch-image` | — | Download a `cdn.bsky.app` image; returns the bytes |
+| `POST /extract-article` | — | Fetch + trafilatura-extract text from an article URL |
+| `POST /fetch` | required | Paginated bookmark enumeration with opaque cursor |
+| `POST /enrich` | — | Decode `post_created_at` offline from at-URI rkeys |
+| `POST /hydrate-threads` | required | Concurrent same-author thread reply hydration |
+
+Endpoints that require credentials accept `{handle, app_password, pds?}`
+in the request body; the daemon does its own `createSession` per request
+and never persists anything. `pds` defaults to `https://bsky.social` when
+absent. `/hydrate-threads` validates credentials (to fail-fast on a bad
+app password) but reads threads from the public AppView unauthenticated.
+
+The full HTTP API contracts live in the consumer repo:
+
+- v1 endpoints (`/ping`, `/fetch-image`, `/extract-article`):
+  [`bsky-saves-gui/docs/bsky-saves-serve-requirements.md`](https://github.com/tenorune/bsky-saves-gui/blob/main/docs/bsky-saves-serve-requirements.md).
+- v2 endpoints (`/fetch`, `/enrich`, `/hydrate-threads`):
+  [`bsky-saves-gui/docs/bsky-saves-serve-fetch-enrich-threads-requirements.md`](https://github.com/tenorune/bsky-saves-gui/blob/main/docs/bsky-saves-serve-fetch-enrich-threads-requirements.md).
 
 ## Inventory schema
 
@@ -117,7 +134,7 @@ The full HTTP API contract lives in the consumer-side requirements doc:
       "thread_replies": [
         { "uri": "...", "indexedAt": "...", "text": "...", "images": [...] }
       ],
-      "thread_schema_version": 3,
+      "thread_schema_version": 4,
       "thread_fetched_at": "...",
 
       // Added by `hydrate images`:
