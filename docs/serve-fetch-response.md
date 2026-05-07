@@ -280,3 +280,69 @@ fallback.
 - Tests: `tests/test_serve.py` (look for `test_fetch_*`).
 - Spec: `docs/superpowers/specs/2026-05-04-bsky-saves-v0.3-serve-subcommand.md` (v0.3 — original `/serve`),
   `docs/superpowers/specs/2026-05-06-bsky-saves-v0.4-serve-fetch-enrich-threads.md` (v0.4 — `/fetch` introduction).
+
+---
+
+## Appendix: CLI inventory vs `/fetch` response
+
+A common question: is the JSON `bsky-saves fetch` writes to its inventory
+file the same as what `POST /fetch` returns over HTTP? Short answer: at
+the per-entry level, yes — identical. At the top-level wrapper, different.
+
+### At the per-entry level — identical
+
+Both surfaces run every record through `bsky_saves.normalize.normalise_record`.
+Same fields, same keys, same snake_case conventions, same embed/image/quoted-post
+normalisation. That's by design — the v2 requirements doc says the response
+shape mirrors what `bsky-saves fetch` writes to its CLI inventory, so the
+GUI's `parseInventory` accepts both.
+
+You can take a `saves[i]` entry from one and drop it into the other; they
+have the same set of populated fields.
+
+### At the top-level wrapper — different
+
+The two surfaces serve different needs:
+
+| | CLI: `bsky-saves fetch ./inv.json` | HTTP: `POST /fetch` |
+|---|---|---|
+| Wrapper | `{"fetched_at": "...", "saves": [...]}` | `{"saves": [...], "cursor": "...", "rotated_credentials": {...}}` |
+| Pagination | Walks all pages internally; writes the merged total | One page per call; opaque `cursor` for the next |
+| Persistence | Writes to a JSON file on disk | Returns JSON in the HTTP response |
+| `fetched_at` | Top-level timestamp updated each run | Absent (the GUI sets its own when it composes an inventory) |
+| Auth lifecycle | One `createSession` per CLI invocation | One `createSession` (or no `createSession` under JWT path) per request; rotated credentials surfaced in the response |
+| `rotated_credentials` | Never present (CLI re-auths each invocation from `BSKY_APP_PASSWORD`) | Present on JWT-path responses where a refresh occurred |
+
+### Post-hydration divergence
+
+After the initial fetch, the per-entry shape on the two surfaces diverges
+as additional commands/endpoints add fields. The CLI inventory accumulates
+these fields in place as the user runs more commands:
+
+| Field | Added by (CLI) | Equivalent on the HTTP side |
+|---|---|---|
+| `post_created_at` | `bsky-saves enrich` | GUI calls `POST /enrich` and merges into its in-memory inventory |
+| `article_text`, `article_published_at`, `article_fetched_at` | `bsky-saves hydrate articles` | GUI calls `POST /extract-article` per linked URL and merges |
+| `thread_replies`, `thread_schema_version`, `thread_fetched_at` | `bsky-saves hydrate threads` | GUI calls `POST /hydrate-threads` and merges |
+| `local_images` | `bsky-saves hydrate images` | GUI calls `POST /fetch-image` per CDN URL and constructs `local_images` itself |
+
+The CLI accumulates these into the on-disk inventory file in place. The
+HTTP daemon returns each operation's output separately and the GUI does
+the merging — mirrors of each other but with different orchestration.
+
+### `listRecords` stub fields apply equally to both
+
+If only the `com.atproto.repo.listRecords` fallback endpoint succeeded
+(all three hydrated bookmark endpoints failed), entries on both surfaces
+will have the same stubbed fields — `post_text: ""`, `author` with empty
+strings, `embed: null`, `images: []`. See the main "subtle implication"
+section above; the stub behavior is a property of `normalise_record`'s
+input, not of which surface you're looking at.
+
+### Implication for downstream consumers
+
+A downstream consumer reading either format can use the same code at the
+per-entry level. The wrapper differs (compose `{saves: [...]}` from
+page-by-page HTTP accumulation, or read the full `{fetched_at, saves: [...]}`
+from the file), but everything inside each `saves[i]` is identical
+between the two surfaces.
