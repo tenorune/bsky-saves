@@ -9,10 +9,17 @@ thread.
 
 Idempotent: skips entries whose stored ``thread_schema_version`` matches
 the current value, or marked with ``thread_fetch_error``.
+
+Crash-safe: per-iteration atomic writes (added in v0.4.2) durably persist
+each save's hydration to disk before moving to the next, so a process
+killed mid-loop (Ctrl-C, ``Worker.terminate()``) preserves all completed
+saves. The skip conditions above let a re-run resume from where it
+stopped.
 """
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -45,6 +52,21 @@ TIMEOUT = 30.0
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _atomic_write_inventory(inventory_path: Path, inv: dict) -> None:
+    """Atomically write the inventory dict to disk via temp-file + os.replace.
+
+    A process killed mid-write never leaves a corrupted JSON file — the
+    rename is atomic on POSIX and Windows alike (os.replace overwrites
+    destination cross-platform; os.rename has Windows-side quirks).
+    """
+    tmp = inventory_path.with_suffix(inventory_path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, inventory_path)
 
 
 def fetch_thread(
@@ -153,54 +175,58 @@ def hydrate_threads(
     found_any = 0
     quoted_walked = 0
     for i, s in enumerate(pending, 1):
-        uri = s["uri"]
-        author_did = s["author"]["did"]
-        print(f"  [{i}/{len(pending)}] {uri[:80]}", file=sys.stderr)
-        thread, error = fetch_thread(uri, appview=appview, user_agent=user_agent)
-        s["thread_fetched_at"] = _now_iso()
-        if thread is not None:
-            replies = collect_same_author_replies(thread, author_did)
-            s["thread_replies"] = replies
-            s["thread_schema_version"] = THREAD_SCHEMA_VERSION
-            s.pop("thread_fetch_error", None)
-            success += 1
-            if replies:
-                found_any += 1
-            print(f"    ok ({len(replies)} self-replies)", file=sys.stderr)
-        else:
-            s["thread_fetch_error"] = error
-            s.pop("thread_replies", None)
-            failed += 1
-            print(f"    FAIL: {error}", file=sys.stderr)
-        time.sleep(RATE_LIMIT_SEC)
+        # try/finally so the per-iteration atomic flush runs whether the
+        # body completes normally, hits a `continue` shortcut in the
+        # quoted-post block, or raises. fetched_at is intentionally NOT
+        # updated here — only the final post-loop write stamps it.
+        try:
+            uri = s["uri"]
+            author_did = s["author"]["did"]
+            print(f"  [{i}/{len(pending)}] {uri[:80]}", file=sys.stderr)
+            thread, error = fetch_thread(uri, appview=appview, user_agent=user_agent)
+            s["thread_fetched_at"] = _now_iso()
+            if thread is not None:
+                replies = collect_same_author_replies(thread, author_did)
+                s["thread_replies"] = replies
+                s["thread_schema_version"] = THREAD_SCHEMA_VERSION
+                s.pop("thread_fetch_error", None)
+                success += 1
+                if replies:
+                    found_any += 1
+                print(f"    ok ({len(replies)} self-replies)", file=sys.stderr)
+            else:
+                s["thread_fetch_error"] = error
+                s.pop("thread_replies", None)
+                failed += 1
+                print(f"    FAIL: {error}", file=sys.stderr)
+            time.sleep(RATE_LIMIT_SEC)
 
-        quoted = s.get("quoted_post") or {}
-        if not isinstance(quoted, dict):
-            continue
-        if quoted.get("unavailable"):
-            continue
-        quoted_uri = quoted.get("uri")
-        quoted_did = (quoted.get("author") or {}).get("did")
-        if not quoted_uri or not quoted_did:
-            continue
-        print(f"    quoted-post thread: {quoted_uri[:80]}", file=sys.stderr)
-        qthread, qerror = fetch_thread(quoted_uri, appview=appview, user_agent=user_agent)
-        if qthread is not None:
-            qreplies = collect_same_author_replies(qthread, quoted_did)
-            quoted["thread_replies"] = qreplies
-            quoted.pop("thread_fetch_error", None)
-            quoted_walked += 1
-            print(f"      ok ({len(qreplies)} self-replies)", file=sys.stderr)
-        else:
-            quoted["thread_fetch_error"] = qerror
-            print(f"      FAIL: {qerror}", file=sys.stderr)
-        time.sleep(RATE_LIMIT_SEC)
+            quoted = s.get("quoted_post") or {}
+            if not isinstance(quoted, dict):
+                continue
+            if quoted.get("unavailable"):
+                continue
+            quoted_uri = quoted.get("uri")
+            quoted_did = (quoted.get("author") or {}).get("did")
+            if not quoted_uri or not quoted_did:
+                continue
+            print(f"    quoted-post thread: {quoted_uri[:80]}", file=sys.stderr)
+            qthread, qerror = fetch_thread(quoted_uri, appview=appview, user_agent=user_agent)
+            if qthread is not None:
+                qreplies = collect_same_author_replies(qthread, quoted_did)
+                quoted["thread_replies"] = qreplies
+                quoted.pop("thread_fetch_error", None)
+                quoted_walked += 1
+                print(f"      ok ({len(qreplies)} self-replies)", file=sys.stderr)
+            else:
+                quoted["thread_fetch_error"] = qerror
+                print(f"      FAIL: {qerror}", file=sys.stderr)
+            time.sleep(RATE_LIMIT_SEC)
+        finally:
+            _atomic_write_inventory(inventory_path, inv)
 
     inv["fetched_at"] = _now_iso()
-    inventory_path.write_text(
-        json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    _atomic_write_inventory(inventory_path, inv)
 
     print(
         f"bsky-saves: {success} hydrated ({found_any} had self-replies, "
