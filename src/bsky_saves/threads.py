@@ -144,9 +144,39 @@ def hydrate_threads(
     *,
     appview: str = DEFAULT_APPVIEW,
     user_agent: str = DEFAULT_USER_AGENT,
-) -> tuple[int, int]:
-    """Hydrate every save with same-author thread descendants.
-    Returns (success, failed)."""
+    limit: int | None = None,
+) -> tuple[int, int, int]:
+    """Hydrate saves with same-author thread descendants.
+
+    Args:
+        inventory_path: Path to the inventory JSON file.
+        appview: AppView base URL for thread fetches.
+        user_agent: User-Agent header for outbound HTTP requests.
+        limit: Optional cap on the number of pending saves to process in
+            this call. ``None`` (default) processes every pending save —
+            byte-identical to pre-v0.4.3 behavior. A non-negative ``int``
+            processes at most ``limit`` saves and returns; the next call
+            resumes from where this one stopped via the existing
+            skip-already-done conditions. Both succeeded and failed saves
+            count toward ``limit``. ``limit=0`` is a valid no-op.
+
+    Returns:
+        ``(succeeded, failed, remaining)`` — ``remaining`` is the count of
+        pending saves still un-hydrated when the function returned. The
+        caller stops when ``remaining == 0``.
+
+    Raises:
+        ValueError: ``limit`` is negative or not ``None``/``int``.
+
+    `fetched_at` semantics: stamped on the final write only when this call
+    exhausted ``pending`` (i.e., ``remaining == 0``). A call that returns
+    because it hit ``limit`` does NOT stamp, preserving the
+    ``fetched_at`` = "a complete pass finished" invariant for CLI users.
+    """
+    if limit is not None:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 0:
+            raise ValueError("limit must be a non-negative int or None")
+
     inv = json.loads(inventory_path.read_text(encoding="utf-8"))
     saves = inv["saves"]
 
@@ -163,10 +193,15 @@ def hydrate_threads(
 
     if not pending:
         print("bsky-saves: nothing to hydrate", file=sys.stderr)
-        return 0, 0
+        return 0, 0, 0
+
+    if limit == 0:
+        # Valid no-op call. Don't stamp fetched_at (pending isn't exhausted).
+        return 0, 0, len(pending)
 
     print(
-        f"bsky-saves: {len(pending)} entries to hydrate threads",
+        f"bsky-saves: {len(pending)} entries to hydrate threads"
+        + (f" (limit={limit})" if limit is not None else ""),
         file=sys.stderr,
     )
 
@@ -174,7 +209,10 @@ def hydrate_threads(
     failed = 0
     found_any = 0
     quoted_walked = 0
+    processed = 0
     for i, s in enumerate(pending, 1):
+        if limit is not None and processed >= limit:
+            break
         # try/finally so the per-iteration atomic flush runs whether the
         # body completes normally, hits a `continue` shortcut in the
         # quoted-post block, or raises. fetched_at is intentionally NOT
@@ -199,6 +237,11 @@ def hydrate_threads(
                 s.pop("thread_replies", None)
                 failed += 1
                 print(f"    FAIL: {error}", file=sys.stderr)
+            # Count the save as processed once its primary thread fetch is
+            # done, regardless of success/failure. Doing it here (inside the
+            # try, before the quoted-post block) means `continue` shortcuts
+            # in the quoted-post handling don't bypass the counter.
+            processed += 1
             time.sleep(RATE_LIMIT_SEC)
 
             quoted = s.get("quoted_post") or {}
@@ -225,12 +268,19 @@ def hydrate_threads(
         finally:
             _atomic_write_inventory(inventory_path, inv)
 
-    inv["fetched_at"] = _now_iso()
+    remaining = len(pending) - processed
+    if remaining == 0:
+        # Pending exhausted in this call — stamp fetched_at to mark the
+        # complete pass. Calls that returned because they hit `limit`
+        # leave fetched_at alone, preserving the
+        # "fetched_at = a complete pass finished" CLI invariant.
+        inv["fetched_at"] = _now_iso()
     _atomic_write_inventory(inventory_path, inv)
 
     print(
         f"bsky-saves: {success} hydrated ({found_any} had self-replies, "
-        f"{quoted_walked} quoted-post threads also walked), {failed} failed",
+        f"{quoted_walked} quoted-post threads also walked), {failed} failed"
+        + (f", {remaining} pending" if remaining else ""),
         file=sys.stderr,
     )
-    return success, failed
+    return success, failed, remaining
