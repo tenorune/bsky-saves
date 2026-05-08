@@ -255,8 +255,8 @@ def test_per_iteration_flush_writes_inventory_after_each_save(
 
     monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
 
-    success, failed = hydrate_threads(inv_path)
-    assert (success, failed) == (3, 0)
+    success, failed, remaining = hydrate_threads(inv_path)
+    assert (success, failed, remaining) == (3, 0, 0)
 
     # When call N starts, calls 1..N-1 should already be on disk.
     assert snapshots == [
@@ -469,8 +469,265 @@ def test_resume_after_partial_progress(tmp_path, monkeypatch):
 
     monkeypatch.setattr(_threads_mod, "fetch_thread", clean_fetch)
 
-    success, failed = hydrate_threads(inv_path)
+    success, failed, remaining = hydrate_threads(inv_path)
 
     # Save 1 was already done — skipped. Saves 2 and 3 retried.
-    assert (success, failed) == (2, 0)
+    assert (success, failed, remaining) == (2, 0, 0)
     assert visited == ["at://x/2", "at://x/3"]
+
+
+# --- v0.4.3: caller-driven batching via the `limit` kwarg ---
+
+
+def test_limit_one_processes_exactly_one_per_call(tmp_path, monkeypatch):
+    """3 pending saves, three sequential calls with limit=1; each call
+    processes exactly one. fetched_at only stamped on the final call."""
+    _silence_rate_limit(monkeypatch)
+
+    inv = _make_inventory(
+        _make_pending_save("at://x/1"),
+        _make_pending_save("at://x/2"),
+        _make_pending_save("at://x/3"),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    original_fetched_at = inv["fetched_at"]
+
+    visited: list[str] = []
+
+    def fake_fetch(uri, **kwargs):
+        visited.append(uri)
+        return {
+            "post": {
+                "uri": uri,
+                "author": {"did": OP, "handle": "x"},
+                "indexedAt": "2026-04-12T00:00:00Z",
+                "record": {"text": ""},
+                "embed": {},
+            },
+            "replies": [],
+        }, None
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
+    monkeypatch.setattr(
+        _threads_mod, "_now_iso", lambda: "2026-05-08T12:00:00Z"
+    )
+
+    # Call 1: process at://x/1; remaining 2.
+    s1, f1, r1 = hydrate_threads(inv_path, limit=1)
+    assert (s1, f1, r1) == (1, 0, 2)
+    assert visited == ["at://x/1"]
+    on_disk = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert on_disk["fetched_at"] == original_fetched_at  # NOT stamped
+
+    # Call 2: process at://x/2; remaining 1.
+    s2, f2, r2 = hydrate_threads(inv_path, limit=1)
+    assert (s2, f2, r2) == (1, 0, 1)
+    assert visited == ["at://x/1", "at://x/2"]
+    on_disk = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert on_disk["fetched_at"] == original_fetched_at  # NOT stamped yet
+
+    # Call 3: process at://x/3; remaining 0; fetched_at stamped.
+    s3, f3, r3 = hydrate_threads(inv_path, limit=1)
+    assert (s3, f3, r3) == (1, 0, 0)
+    assert visited == ["at://x/1", "at://x/2", "at://x/3"]
+    on_disk = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert on_disk["fetched_at"] == "2026-05-08T12:00:00Z"  # stamped on final
+
+
+def test_limit_zero_is_noop(tmp_path, monkeypatch):
+    """limit=0 against non-empty pending → returns (0, 0, N), no fetches."""
+    _silence_rate_limit(monkeypatch)
+
+    inv = _make_inventory(
+        _make_pending_save("at://x/1"),
+        _make_pending_save("at://x/2"),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+    original_fetched_at = inv["fetched_at"]
+
+    fetch_calls = {"n": 0}
+
+    def fake_fetch(uri, **kwargs):
+        fetch_calls["n"] += 1
+        return {}, None
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
+
+    success, failed, remaining = hydrate_threads(inv_path, limit=0)
+    assert (success, failed, remaining) == (0, 0, 2)
+    assert fetch_calls["n"] == 0
+
+    # No-op MUST NOT touch fetched_at.
+    on_disk = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert on_disk["fetched_at"] == original_fetched_at
+
+
+def test_limit_zero_with_empty_pending_returns_zero_remaining(tmp_path):
+    """limit=0 when nothing is pending also returns (0, 0, 0)."""
+    inv = _make_inventory(
+        # Already-hydrated save (excluded by the pending filter).
+        {
+            "uri": "at://x/done",
+            "author": {"did": OP, "handle": "x"},
+            "saved_at": "2026-04-12T00:00:00Z",
+            "thread_replies": [],
+            "thread_schema_version": THREAD_SCHEMA_VERSION,
+            "thread_fetched_at": "2026-05-01T00:00:00Z",
+        },
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    success, failed, remaining = hydrate_threads(inv_path, limit=0)
+    assert (success, failed, remaining) == (0, 0, 0)
+
+
+def test_limit_greater_than_pending_processes_all(tmp_path, monkeypatch):
+    """limit > len(pending) is equivalent to limit=None — exhausts pending,
+    stamps fetched_at, returns remaining=0."""
+    _silence_rate_limit(monkeypatch)
+
+    inv = _make_inventory(
+        _make_pending_save("at://x/1"),
+        _make_pending_save("at://x/2"),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    def fake_fetch(uri, **kwargs):
+        return {
+            "post": {
+                "uri": uri,
+                "author": {"did": OP, "handle": "x"},
+                "indexedAt": "2026-04-12T00:00:00Z",
+                "record": {"text": ""},
+                "embed": {},
+            },
+            "replies": [],
+        }, None
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
+    monkeypatch.setattr(
+        _threads_mod, "_now_iso", lambda: "2026-05-08T12:00:00Z"
+    )
+
+    success, failed, remaining = hydrate_threads(inv_path, limit=100)
+    assert (success, failed, remaining) == (2, 0, 0)
+    on_disk = json.loads(inv_path.read_text(encoding="utf-8"))
+    assert on_disk["fetched_at"] == "2026-05-08T12:00:00Z"  # stamped
+
+
+def test_limit_counts_failed_items(tmp_path, monkeypatch):
+    """All-failure run: failed items count toward limit so a caller's batch
+    loop terminates rather than spinning forever on the same items."""
+    _silence_rate_limit(monkeypatch)
+
+    inv = _make_inventory(
+        _make_pending_save("at://x/1"),
+        _make_pending_save("at://x/2"),
+        _make_pending_save("at://x/3"),
+    )
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    def all_fail_fetch(uri, **kwargs):
+        return None, "http_500"
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", all_fail_fetch)
+
+    success, failed, remaining = hydrate_threads(inv_path, limit=2)
+    # 2 attempts, both failed; 1 still untouched in pending.
+    assert (success, failed, remaining) == (0, 2, 1)
+
+    # Subsequent call with limit=2: the 2 already-failed saves are now
+    # excluded by the pending filter (thread_fetch_error set), so only
+    # the 3rd save is pending.
+    success, failed, remaining = hydrate_threads(inv_path, limit=2)
+    assert (success, failed, remaining) == (0, 1, 0)
+
+
+def test_limit_negative_raises_value_error(tmp_path):
+    inv = _make_inventory(_make_pending_save("at://x/1"))
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-negative int or None"):
+        hydrate_threads(inv_path, limit=-1)
+
+
+def test_limit_non_int_raises_value_error(tmp_path):
+    inv = _make_inventory(_make_pending_save("at://x/1"))
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-negative int or None"):
+        hydrate_threads(inv_path, limit="3")  # type: ignore[arg-type]
+
+
+def test_limit_bool_rejected(tmp_path):
+    """bool is a subclass of int in Python; reject it explicitly so
+    `limit=True` doesn't silently mean `limit=1`."""
+    inv = _make_inventory(_make_pending_save("at://x/1"))
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-negative int or None"):
+        hydrate_threads(inv_path, limit=True)  # type: ignore[arg-type]
+
+
+def test_batched_run_matches_single_call_inventory(tmp_path, monkeypatch):
+    """The final inventory after N sequential limit=1 calls is identical to
+    the inventory after a single limit=None call (modulo timestamps which
+    we control)."""
+    _silence_rate_limit(monkeypatch)
+
+    def fake_fetch(uri, **kwargs):
+        return {
+            "post": {
+                "uri": uri,
+                "author": {"did": OP, "handle": "x"},
+                "indexedAt": "2026-04-12T00:00:00Z",
+                "record": {"text": ""},
+                "embed": {},
+            },
+            "replies": [],
+        }, None
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
+    monkeypatch.setattr(
+        _threads_mod, "_now_iso", lambda: "2026-05-08T12:00:00Z"
+    )
+
+    # Single-call run.
+    inv_a = _make_inventory(
+        _make_pending_save("at://x/1"),
+        _make_pending_save("at://x/2"),
+        _make_pending_save("at://x/3"),
+    )
+    path_a = tmp_path / "single.json"
+    path_a.write_text(json.dumps(inv_a), encoding="utf-8")
+    hydrate_threads(path_a)
+    single_run = json.loads(path_a.read_text(encoding="utf-8"))
+
+    # Batched run, limit=1 three times.
+    inv_b = _make_inventory(
+        _make_pending_save("at://x/1"),
+        _make_pending_save("at://x/2"),
+        _make_pending_save("at://x/3"),
+    )
+    path_b = tmp_path / "batched.json"
+    path_b.write_text(json.dumps(inv_b), encoding="utf-8")
+    while True:
+        _, _, remaining = hydrate_threads(path_b, limit=1)
+        if remaining == 0:
+            break
+    batched_run = json.loads(path_b.read_text(encoding="utf-8"))
+
+    # Per-save mutations must match exactly.
+    saves_a = {s["uri"]: s for s in single_run["saves"]}
+    saves_b = {s["uri"]: s for s in batched_run["saves"]}
+    for uri in saves_a:
+        assert saves_a[uri] == saves_b[uri], f"mismatch on {uri}"
+    assert single_run["fetched_at"] == batched_run["fetched_at"]
