@@ -19,7 +19,6 @@ stopped.
 from __future__ import annotations
 
 import json
-import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -27,6 +26,7 @@ from pathlib import Path
 
 import httpx
 
+from ._io import atomic_write_inventory
 from .normalize import extract_media
 
 # Bump this when the thread_replies schema changes; entries whose stored
@@ -53,20 +53,6 @@ TIMEOUT = 30.0
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-
-def _atomic_write_inventory(inventory_path: Path, inv: dict) -> None:
-    """Atomically write the inventory dict to disk via temp-file + os.replace.
-
-    A process killed mid-write never leaves a corrupted JSON file — the
-    rename is atomic on POSIX and Windows alike (os.replace overwrites
-    destination cross-platform; os.rename has Windows-side quirks).
-    """
-    tmp = inventory_path.with_suffix(inventory_path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(tmp, inventory_path)
 
 
 def fetch_thread(
@@ -266,7 +252,7 @@ def hydrate_threads(
                 print(f"      FAIL: {qerror}", file=sys.stderr)
             time.sleep(RATE_LIMIT_SEC)
         finally:
-            _atomic_write_inventory(inventory_path, inv)
+            atomic_write_inventory(inventory_path, inv)
 
     remaining = len(pending) - processed
     if remaining == 0:
@@ -275,7 +261,7 @@ def hydrate_threads(
         # leave fetched_at alone, preserving the
         # "fetched_at = a complete pass finished" CLI invariant.
         inv["fetched_at"] = _now_iso()
-    _atomic_write_inventory(inventory_path, inv)
+    atomic_write_inventory(inventory_path, inv)
 
     print(
         f"bsky-saves: {success} hydrated ({found_any} had self-replies, "

@@ -404,7 +404,7 @@ def test_atomic_write_uses_os_replace(tmp_path, monkeypatch):
         rename_calls.append((str(src), str(dst)))
         real_replace(src, dst)
 
-    monkeypatch.setattr("bsky_saves.threads.os.replace", spy_replace)
+    monkeypatch.setattr("bsky_saves._io.os.replace", spy_replace)
 
     hydrate_threads(inv_path)
 
