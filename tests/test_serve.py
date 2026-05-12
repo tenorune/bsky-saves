@@ -116,16 +116,15 @@ def test_cors_allowed_origin_echoed_on_normal_response():
     assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
 
 
-def test_cors_disallowed_origin_omits_allow_origin_header():
+def test_cors_disallowed_origin_returns_403():
+    """Non-allowlisted origins receive an explicit 403, not just a missing
+    Allow-Origin header."""
     with serve_in_background() as (port, _):
-        status, headers, _ = _request(
+        status, _, body = _request(
             port, "/ping", headers={"Origin": "https://evil.example"}
         )
-    assert status == 200
-    assert "Access-Control-Allow-Origin" not in headers
-    # Other CORS headers still present (CORS is a browser-side mechanism;
-    # absence of Allow-Origin is what fails the request closed).
-    assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+    assert status == 403
+    assert json.loads(body) == {"error": "Origin not allowed"}
 
 
 def test_cors_no_origin_header_request_succeeds():
@@ -382,14 +381,53 @@ def test_multiple_allow_origins_all_allowed():
     a = "https://a.example"
     b = "https://b.example"
     with serve_in_background(allow_origins=(a, b)) as (port, _):
-        _, h_a, _ = _request(port, "/ping", headers={"Origin": a})
-        _, h_b, _ = _request(port, "/ping", headers={"Origin": b})
-        _, h_other, _ = _request(
+        status_a, h_a, _ = _request(port, "/ping", headers={"Origin": a})
+        status_b, h_b, _ = _request(port, "/ping", headers={"Origin": b})
+        status_c, _, body_c = _request(
             port, "/ping", headers={"Origin": "https://c.example"}
         )
+    assert status_a == 200
     assert h_a["Access-Control-Allow-Origin"] == a
+    assert status_b == 200
     assert h_b["Access-Control-Allow-Origin"] == b
-    assert "Access-Control-Allow-Origin" not in h_other
+    assert status_c == 403
+    assert json.loads(body_c) == {"error": "Origin not allowed"}
+
+
+def test_options_preflight_from_disallowed_origin_returns_403():
+    """Spec §4.4: OPTIONS from disallowed origin also returns 403, not 204."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="OPTIONS",
+            headers={"Origin": "https://evil.example"},
+        )
+    assert status == 403
+    assert json.loads(body) == {"error": "Origin not allowed"}
+
+
+def test_options_preflight_from_allowed_origin_returns_204():
+    """Allowed origin still gets the 204 with echoed Allow-Origin."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port,
+            "/fetch-image",
+            method="OPTIONS",
+            headers={"Origin": DEFAULT_ORIGIN},
+        )
+    assert status == 204
+    assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+
+
+def test_ping_origin_disallowed_returns_403():
+    """Spec §5.1 (post-2026-05-12 revision): /ping enforces Origin like every
+    other endpoint."""
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Origin": "https://attacker.example"}
+        )
+    assert status == 403
 
 
 def test_verbose_logs_request_to_stderr(capfd):

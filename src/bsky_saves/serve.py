@@ -576,11 +576,13 @@ def make_handler(
             return parsed if isinstance(parsed, dict) else None
 
         def _security_gate(self, method: str) -> bool:
-            """Validate Host (and later Origin). Returns True if the request
-            may proceed to _dispatch; returns False after sending a rejection
+            """Validate Host and Origin. Returns True if the request may
+            proceed to _dispatch; returns False after sending a rejection
             response. Called from every do_* entrypoint before route handling.
             """
             if not self._check_host():
+                return False
+            if not self._check_origin():
                 return False
             return True
 
@@ -591,6 +593,17 @@ def make_handler(
             expected = {f"127.0.0.1:{port}", f"localhost:{port}"}
             if host not in expected:
                 self._send_json_error(421, "misdirected request")
+                return False
+            return True
+
+        def _check_origin(self) -> bool:
+            """Reject disallowed-origin requests with 403. Missing Origin is
+            allowed (curl-style is permitted per spec §4.4)."""
+            origin = self.headers.get("Origin", "")
+            if not origin:
+                return True
+            if origin not in origins:
+                self._send_json_error(403, "Origin not allowed")
                 return False
             return True
 
