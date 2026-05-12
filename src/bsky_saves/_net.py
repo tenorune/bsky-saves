@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import ipaddress
 import socket
-from urllib.parse import urlparse
+from collections.abc import Callable
+from urllib.parse import urljoin, urlparse
+
+import httpx
 
 
 class UnsafeURLError(ValueError):
@@ -99,3 +102,41 @@ def assert_public_http_url(url: str, *, allow_http: bool = False) -> None:
             raise UnsafeURLError(
                 f"hostname {host!r} resolves to unsafe address {resolved}"
             )
+
+
+class TooManyRedirectsError(Exception):
+    """safe_http_get exceeded its redirect budget."""
+
+
+def safe_http_get(
+    url: str,
+    *,
+    allow_http: bool = False,
+    max_redirects: int = 5,
+    hop_check: Callable[[str], None] | None = None,
+    **httpx_kwargs,
+) -> httpx.Response:
+    """Like httpx.get, but walks redirects manually with assert_public_http_url
+    re-applied per hop. ``hop_check`` runs before the SSRF check on each hop
+    (used to enforce per-endpoint allowlists in addition to the SSRF guard).
+    Disables httpx's own redirect-following.
+
+    Raises:
+        UnsafeURLError: any hop fails ``hop_check`` or the SSRF guard.
+        TooManyRedirectsError: more than ``max_redirects`` 3xx responses chained.
+    """
+    httpx_kwargs.pop("follow_redirects", None)  # we follow manually
+    current = url
+    for _ in range(max_redirects + 1):
+        if hop_check is not None:
+            hop_check(current)
+        assert_public_http_url(current, allow_http=allow_http)
+        r = httpx.get(current, follow_redirects=False, **httpx_kwargs)
+        if 300 <= r.status_code < 400 and "location" in (h.lower() for h in r.headers):
+            location = r.headers.get("Location") or r.headers.get("location")
+            if not location:
+                return r
+            current = urljoin(current, location)
+            continue
+        return r
+    raise TooManyRedirectsError(f"exceeded {max_redirects} redirects starting from {url!r}")

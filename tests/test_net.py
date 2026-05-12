@@ -138,3 +138,77 @@ def test_empty_url_rejected():
 def test_url_without_hostname_rejected():
     with pytest.raises(UnsafeURLError):
         assert_public_http_url("https:///path", allow_http=True)
+
+
+import httpx
+import respx
+
+from bsky_saves._net import TooManyRedirectsError, safe_http_get
+
+
+@respx.mock
+def test_safe_http_get_happy_path_returns_response():
+    route = respx.get("https://example.com/x").mock(
+        return_value=httpx.Response(200, content=b"ok")
+    )
+    r = safe_http_get("https://example.com/x")
+    assert r.status_code == 200
+    assert r.content == b"ok"
+    assert route.called
+
+
+def test_safe_http_get_rejects_unsafe_initial_url():
+    with pytest.raises(UnsafeURLError):
+        safe_http_get("https://127.0.0.1/x")
+
+
+@respx.mock
+def test_safe_http_get_follows_safe_redirect():
+    respx.get("https://example.com/a").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://example.com/b"})
+    )
+    respx.get("https://example.com/b").mock(
+        return_value=httpx.Response(200, content=b"final")
+    )
+    r = safe_http_get("https://example.com/a")
+    assert r.status_code == 200
+    assert r.content == b"final"
+
+
+@respx.mock
+def test_safe_http_get_rejects_redirect_to_private_ip():
+    respx.get("https://example.com/a").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://127.0.0.1/b"})
+    )
+    with pytest.raises(UnsafeURLError):
+        safe_http_get("https://example.com/a")
+
+
+@respx.mock
+def test_safe_http_get_hop_check_runs_on_each_target():
+    """hop_check raises -> safe_http_get propagates the exception."""
+    respx.get("https://example.com/a").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://other.com/b"})
+    )
+
+    def reject_other(url: str) -> None:
+        if "other.com" in url:
+            raise UnsafeURLError("not allowed by hop_check")
+
+    with pytest.raises(UnsafeURLError):
+        safe_http_get("https://example.com/a", hop_check=reject_other)
+
+
+@respx.mock
+def test_safe_http_get_too_many_redirects():
+    respx.get("https://example.com/a").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://example.com/b"})
+    )
+    respx.get("https://example.com/b").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://example.com/c"})
+    )
+    respx.get("https://example.com/c").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://example.com/d"})
+    )
+    with pytest.raises(TooManyRedirectsError):
+        safe_http_get("https://example.com/a", max_redirects=2)
