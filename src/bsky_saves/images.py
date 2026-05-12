@@ -20,6 +20,7 @@ from typing import Iterator
 
 import httpx
 
+from . import __version__
 from ._io import atomic_write_inventory
 from ._net import safe_http_get
 
@@ -60,9 +61,7 @@ def _iter_image_urls(entry: dict) -> Iterator[str]:
                 yield url
 
 
-DEFAULT_USER_AGENT = (
-    "bsky-saves/0.2 (+https://github.com/tenorune/bsky-saves)"
-)
+DEFAULT_USER_AGENT = f"bsky-saves/{__version__} (+https://github.com/tenorune/bsky-saves)"
 TIMEOUT = 30.0
 
 

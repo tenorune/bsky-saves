@@ -22,12 +22,11 @@ from pathlib import Path
 import httpx
 import trafilatura
 
+from . import __version__
 from ._io import atomic_write_inventory
 from ._net import UnsafeURLError, safe_http_get
 
-DEFAULT_USER_AGENT = (
-    "bsky-saves/0.1 (+https://github.com/tenorune/bsky-saves)"
-)
+DEFAULT_USER_AGENT = f"bsky-saves/{__version__} (+https://github.com/tenorune/bsky-saves)"
 RATE_LIMIT_SEC = 1.0
 TIMEOUT = 30.0
 MIN_EXTRACT_CHARS = 100
