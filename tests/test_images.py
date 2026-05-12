@@ -597,3 +597,21 @@ def test_hydrate_images_writes_when_some_but_not_all_entries_change(
     # Now run for everything: p/1 is unchanged, p/2 should be downloaded.
     hydrate_images(inv_path, out_dir)
     assert len(replace_calls) == 1, "mixed run must write exactly once"
+
+
+def test_download_to_rejects_loopback_url(tmp_path):
+    from bsky_saves.images import download_to
+    from bsky_saves._net import UnsafeURLError
+
+    dest = tmp_path / "img-x.jpg"
+    with pytest.raises(UnsafeURLError):
+        download_to("https://127.0.0.1/x.jpg", dest)
+
+
+def test_download_to_rejects_metadata_ip(tmp_path):
+    from bsky_saves.images import download_to
+    from bsky_saves._net import UnsafeURLError
+
+    dest = tmp_path / "img-x.jpg"
+    with pytest.raises(UnsafeURLError):
+        download_to("https://169.254.169.254/img", dest)
