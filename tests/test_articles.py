@@ -53,3 +53,24 @@ def test_fetch_article_short_extraction_returns_too_short_error():
     result, error = fetch_article("https://example.com/a")
     assert result is None
     assert error == "extraction_too_short_or_empty"
+
+
+def test_extract_article_rejects_loopback_url():
+    """SSRF guard rejects http://127.0.0.1 before any HTTP call is made."""
+    from bsky_saves.articles import _extract_article
+
+    extraction, error = _extract_article("http://127.0.0.1/secret")
+    assert extraction is None
+    assert error is not None
+    assert "UnsafeURLError" in error or "fetch_error" in error
+
+
+def test_extract_article_rejects_metadata_ip():
+    """AWS-style metadata IP must be blocked."""
+    from bsky_saves.articles import _extract_article
+
+    extraction, error = _extract_article(
+        "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+    )
+    assert extraction is None
+    assert error is not None

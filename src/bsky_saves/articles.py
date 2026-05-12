@@ -23,6 +23,7 @@ import httpx
 import trafilatura
 
 from ._io import atomic_write_inventory
+from ._net import UnsafeURLError, safe_http_get
 
 DEFAULT_USER_AGENT = (
     "bsky-saves/0.1 (+https://github.com/tenorune/bsky-saves)"
@@ -67,12 +68,15 @@ def _extract_article(
       - "extraction_failed" — trafilatura returned None.
     """
     try:
-        r = httpx.get(
+        r = safe_http_get(
             url,
+            allow_http=True,
+            max_redirects=5,
             headers={"User-Agent": user_agent, "Accept": "text/html,*/*;q=0.8"},
-            follow_redirects=True,
             timeout=TIMEOUT,
         )
+    except UnsafeURLError as e:
+        return None, f"fetch_error:UnsafeURLError:{str(e)[:120]}"
     except Exception as e:
         return None, f"fetch_error:{type(e).__name__}:{str(e)[:120]}"
 
