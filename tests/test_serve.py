@@ -12,7 +12,7 @@ import socket
 import threading
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import respx
@@ -26,11 +26,14 @@ DEFAULT_ORIGIN = "https://saves.lightseed.net"
 @contextlib.contextmanager
 def serve_in_background(allow_origins=(DEFAULT_ORIGIN,), verbose=False):
     """Boot the daemon in a daemon thread on an ephemeral port; yield (port, server)."""
-    handler_cls = serve.make_handler(
-        allow_origins=list(allow_origins), verbose=verbose
-    )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    # Bind port=0 first so the OS assigns an ephemeral port, then build the
+    # handler with the actual port so Host-header validation works correctly.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     port = server.server_address[1]
+    handler_cls = serve.make_handler(
+        port=port, allow_origins=list(allow_origins), verbose=verbose
+    )
+    server.RequestHandlerClass = handler_cls
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -1741,3 +1744,55 @@ def test_hydrate_threads_neither_password_nor_jwt_returns_400():
         )
     assert status == 400
     assert json.loads(body) == {"error": "missing credentials"}
+
+
+# --- v0.4.4: Host header validation (DNS-rebinding protection) ---
+
+
+def test_host_loopback_with_correct_port_accepted():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"127.0.0.1:{port}"}
+        )
+    assert status == 200
+
+
+def test_host_localhost_with_correct_port_accepted():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"localhost:{port}"}
+        )
+    assert status == 200
+
+
+def test_host_unknown_domain_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port, "/ping", headers={"Host": "evil.example.com"}
+        )
+    assert status == 421
+    assert json.loads(body) == {"error": "misdirected request"}
+
+
+def test_host_wrong_port_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"127.0.0.1:{port + 1}"}
+        )
+    assert status == 421
+
+
+def test_host_ipv6_brackets_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"[::1]:{port}"}
+        )
+    assert status == 421
+
+
+def test_host_trailing_dot_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"localhost.:{port}"}
+        )
+    assert status == 421

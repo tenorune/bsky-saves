@@ -502,12 +502,13 @@ def _decode_cursor(wrapped: str) -> dict | None:
 
 def make_handler(
     *,
+    port: int,
     allow_origins: list[str],
     verbose: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
-    """Build a BaseHTTPRequestHandler subclass that closes over allow_origins
-    and verbose. Returning a class (not an instance) is what BaseHTTPRequestHandler
-    expects from ThreadingHTTPServer."""
+    """Build a BaseHTTPRequestHandler subclass that closes over port,
+    allow_origins and verbose. Returning a class (not an instance) is what
+    BaseHTTPRequestHandler expects from ThreadingHTTPServer."""
 
     origins = list(allow_origins)
 
@@ -574,18 +575,43 @@ def make_handler(
                 return None
             return parsed if isinstance(parsed, dict) else None
 
+        def _security_gate(self, method: str) -> bool:
+            """Validate Host (and later Origin). Returns True if the request
+            may proceed to _dispatch; returns False after sending a rejection
+            response. Called from every do_* entrypoint before route handling.
+            """
+            if not self._check_host():
+                return False
+            return True
+
+        def _check_host(self) -> bool:
+            """Reject DNS-rebinding: Host must equal 127.0.0.1:<port> or
+            localhost:<port>. Anything else returns 421 Misdirected Request."""
+            host = self.headers.get("Host", "")
+            expected = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            if host not in expected:
+                self._send_json_error(421, "misdirected request")
+                return False
+            return True
+
         def do_OPTIONS(self) -> None:
             self._log_request()
+            if not self._security_gate("OPTIONS"):
+                return
             self.send_response(204)
             self._cors_headers()
             self.end_headers()
 
         def do_GET(self) -> None:
             self._log_request()
+            if not self._security_gate("GET"):
+                return
             self._dispatch("GET")
 
         def do_POST(self) -> None:
             self._log_request()
+            if not self._security_gate("POST"):
+                return
             self._dispatch("POST")
 
         def __getattr__(self, name: str):
@@ -598,6 +624,8 @@ def make_handler(
 
                 def _unknown_verb():
                     self._log_request()
+                    if not self._security_gate(method):
+                        return
                     self._dispatch(method)
 
                 return _unknown_verb
@@ -621,7 +649,7 @@ def run_serve(
 ) -> int:
     """Start the daemon. Blocks until Ctrl-C. Returns an exit code."""
     origins = list(allow_origins or ["https://saves.lightseed.net"])
-    handler_cls = make_handler(allow_origins=origins, verbose=verbose)
+    handler_cls = make_handler(port=port, allow_origins=origins, verbose=verbose)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
     except OSError as e:
