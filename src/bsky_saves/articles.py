@@ -22,6 +22,8 @@ from pathlib import Path
 import httpx
 import trafilatura
 
+from ._io import atomic_write_inventory
+
 DEFAULT_USER_AGENT = (
     "bsky-saves/0.1 (+https://github.com/tenorune/bsky-saves)"
 )
@@ -191,10 +193,7 @@ def hydrate_articles(
         time.sleep(RATE_LIMIT_SEC)
 
     inv["fetched_at"] = _now_iso()
-    inventory_path.write_text(
-        json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_inventory(inventory_path, inv)
 
     print(
         f"bsky-saves: hydrated {success}, failed {failed}",

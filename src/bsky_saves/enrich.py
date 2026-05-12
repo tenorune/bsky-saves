@@ -13,6 +13,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from ._io import atomic_write_inventory
 from .tid import decode_tid_to_iso, rkey_of
 
 
@@ -81,10 +82,7 @@ def enrich_inventory(inventory_path: Path, *, refresh: bool = False) -> dict:
             changed = True
 
     if changed:
-        inventory_path.write_text(
-            json.dumps(inv, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_inventory(inventory_path, inv)
 
     stats = {
         "added": added,
