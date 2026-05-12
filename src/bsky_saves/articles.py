@@ -20,6 +20,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+# trafilatura uses lxml.html.HTMLParser by default, which is XXE-safe
+# (does not resolve external entities). pyproject.toml pins a minimum
+# version known to ship that default.
 import trafilatura
 
 from . import __version__
