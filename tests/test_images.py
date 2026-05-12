@@ -404,7 +404,7 @@ def test_hydrate_images_failure_in_one_entry_does_not_block_others(fixture_facto
 def test_hydrate_images_atomic_write_via_tmp_file(
     fixture_factory, tmp_path, monkeypatch
 ):
-    """Patch os.rename to capture that the write went through a temp file."""
+    """Patch os.replace to capture that the write went through a temp file."""
     f = fixture_factory
     inv = f.inventory(
         f.entry("at://x/p/1", images=[f.image("https://cdn.bsky.app/a.jpg")]),
@@ -414,19 +414,19 @@ def test_hydrate_images_atomic_write_via_tmp_file(
 
     respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
 
-    rename_calls: list[tuple[str, str]] = []
-    real_rename = os.rename
+    replace_calls: list[tuple[str, str]] = []
+    real_replace = os.replace
 
-    def spy_rename(src, dst):
-        rename_calls.append((str(src), str(dst)))
-        real_rename(src, dst)
+    def spy_replace(src, dst):
+        replace_calls.append((str(src), str(dst)))
+        real_replace(src, dst)
 
-    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+    monkeypatch.setattr("bsky_saves._io.os.replace", spy_replace)
 
     hydrate_images(inv_path, tmp_path / "imgs")
 
-    assert len(rename_calls) == 1
-    src, dst = rename_calls[0]
+    assert len(replace_calls) == 1
+    src, dst = replace_calls[0]
     assert dst == str(inv_path)
     assert src.endswith(".tmp")
     written = json.loads(inv_path.read_text(encoding="utf-8"))
@@ -517,22 +517,22 @@ def test_hydrate_images_no_write_when_nothing_changed(
 
     respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
 
-    rename_calls: list[tuple[str, str]] = []
-    real_rename = os.rename
+    replace_calls: list[tuple[str, str]] = []
+    real_replace = os.replace
 
-    def spy_rename(src, dst):
-        rename_calls.append((str(src), str(dst)))
-        real_rename(src, dst)
+    def spy_replace(src, dst):
+        replace_calls.append((str(src), str(dst)))
+        real_replace(src, dst)
 
-    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+    monkeypatch.setattr("bsky_saves._io.os.replace", spy_replace)
 
     hydrate_images(inv_path, out_dir)
-    first_run_renames = len(rename_calls)
-    assert first_run_renames == 1  # first run wrote the inventory
+    first_run_replaces = len(replace_calls)
+    assert first_run_replaces == 1  # first run wrote the inventory
 
-    rename_calls.clear()
+    replace_calls.clear()
     hydrate_images(inv_path, out_dir)
-    assert rename_calls == [], (
+    assert replace_calls == [], (
         "second idempotent run must not rewrite the inventory"
     )
 
@@ -548,18 +548,18 @@ def test_hydrate_images_no_write_when_no_entries_have_images(
     original_text = json.dumps(inv)
     inv_path.write_text(original_text, encoding="utf-8")
 
-    rename_calls: list[tuple[str, str]] = []
-    real_rename = os.rename
+    replace_calls: list[tuple[str, str]] = []
+    real_replace = os.replace
 
-    def spy_rename(src, dst):
-        rename_calls.append((str(src), str(dst)))
-        real_rename(src, dst)
+    def spy_replace(src, dst):
+        replace_calls.append((str(src), str(dst)))
+        real_replace(src, dst)
 
-    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+    monkeypatch.setattr("bsky_saves._io.os.replace", spy_replace)
 
     hydrate_images(inv_path, tmp_path / "imgs")
 
-    assert rename_calls == []
+    assert replace_calls == []
     assert inv_path.read_text(encoding="utf-8") == original_text
 
 
@@ -580,20 +580,20 @@ def test_hydrate_images_writes_when_some_but_not_all_entries_change(
     respx.get("https://cdn.bsky.app/a.jpg").respond(200, content=b"A")
     respx.get("https://cdn.bsky.app/b.jpg").respond(200, content=b"B")
 
-    rename_calls: list[tuple[str, str]] = []
-    real_rename = os.rename
+    replace_calls: list[tuple[str, str]] = []
+    real_replace = os.replace
 
-    def spy_rename(src, dst):
-        rename_calls.append((str(src), str(dst)))
-        real_rename(src, dst)
+    def spy_replace(src, dst):
+        replace_calls.append((str(src), str(dst)))
+        real_replace(src, dst)
 
-    monkeypatch.setattr("bsky_saves.images.os.rename", spy_rename)
+    monkeypatch.setattr("bsky_saves._io.os.replace", spy_replace)
 
     # Pre-hydrate p/1 only.
     hydrate_images(inv_path, out_dir, uris={"at://x/p/1"})
-    assert len(rename_calls) == 1
-    rename_calls.clear()
+    assert len(replace_calls) == 1
+    replace_calls.clear()
 
     # Now run for everything: p/1 is unchanged, p/2 should be downloaded.
     hydrate_images(inv_path, out_dir)
-    assert len(rename_calls) == 1, "mixed run must write exactly once"
+    assert len(replace_calls) == 1, "mixed run must write exactly once"

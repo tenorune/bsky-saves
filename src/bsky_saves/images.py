@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 import httpx
+
+from ._io import atomic_write_inventory
 
 
 def _iter_image_urls(entry: dict) -> Iterator[str]:
@@ -156,12 +157,7 @@ def hydrate_images(
 
     if changed:
         inv["fetched_at"] = _now_iso()
-        tmp_path = inventory_path.with_suffix(inventory_path.suffix + ".tmp")
-        tmp_path.write_text(
-            json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        os.rename(tmp_path, inventory_path)
+        atomic_write_inventory(inventory_path, inv)
 
     print(
         f"bsky-saves: processed {entries_processed} entries, "
