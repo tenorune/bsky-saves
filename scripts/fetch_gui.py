@@ -6,7 +6,10 @@ Run as a build-time hook (via hatch_build.py) or directly:
 from __future__ import annotations
 
 import hashlib
+import io
+import shutil
 import sys
+import tarfile
 import tomllib
 import urllib.error
 import urllib.parse
@@ -96,6 +99,53 @@ def _download(version: str) -> tuple[bytes, str]:
     return data, actual_sha
 
 
+def _extract_tarball(data: bytes, dest: Path) -> None:
+    """Extract dist.tar.gz into dest, applying security and layout rules.
+
+    - Reject any member whose normalised path escapes dest (tar-slip).
+    - Strip a leading 'dist/' directory prefix if every non-skipped member has it.
+    - Skip CNAME files.
+    """
+    dest = dest.resolve()
+    if dest.exists():
+        shutil.rmtree(dest)
+    dest.mkdir(parents=True)
+
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+        members = [m for m in tar.getmembers() if Path(m.name).name != "CNAME"]
+
+        # Decide whether to strip a leading 'dist/' prefix.
+        strip_prefix = ""
+        if members and all(
+            m.name == "dist" or m.name.startswith("dist/")
+            for m in members
+            if m.name
+        ):
+            strip_prefix = "dist/"
+
+        for m in members:
+            name = m.name
+            if strip_prefix and name.startswith(strip_prefix):
+                name = name[len(strip_prefix):]
+            if not name:
+                continue
+            target = (dest / name).resolve()
+            if not str(target).startswith(str(dest)):
+                raise GuiFetchError(
+                    f"refusing to extract member outside dest: {m.name!r}"
+                )
+            if m.isdir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            if not m.isfile():
+                continue  # skip symlinks, devices, etc.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            extracted = tar.extractfile(m)
+            if extracted is None:
+                continue
+            target.write_bytes(extracted.read())
+
+
 def fetch_gui(root: Path | None = None) -> None:
     """Fetch + verify + extract dist.tar.gz into src/bsky_saves/_gui/.
 
@@ -113,8 +163,6 @@ def fetch_gui(root: Path | None = None) -> None:
     version = read_gui_version(root)
     expected_sha = read_expected_sha256(root)
 
-    # NOTE: Tasks 3 and 4 will add extraction and idempotency logic here.
-    # For now, just download + verify so the byte-integrity tests pass.
     data, actual_sha = _download(version)
     if actual_sha != expected_sha:
         raise GuiFetchError(
@@ -122,9 +170,12 @@ def fetch_gui(root: Path | None = None) -> None:
             f"got {actual_sha}"
         )
 
+    gui_dir = root / "src" / "bsky_saves" / "_gui"
+    _extract_tarball(data, gui_dir)
+
     print(
-        f"bsky-saves: downloaded GUI bundle v{version} "
-        f"({actual_sha[:16]}...) — extraction in subsequent task",
+        f"bsky-saves: vendored GUI bundle v{version} "
+        f"({actual_sha[:16]}...) → {gui_dir.relative_to(root)}",
         file=sys.stderr,
     )
 

@@ -109,3 +109,100 @@ def test_fetch_gui_aborts_on_non_github_redirect(tmp_path, gui_tarball_fixture):
         with pytest.raises(GuiFetchError) as exc_info:
             fetch_gui(tmp_path)
     assert "unexpected" in str(exc_info.value).lower() or "host" in str(exc_info.value).lower()
+
+
+import tarfile
+import io
+
+
+def _make_tarball_with_paths(paths: list[tuple[str, bytes]]) -> tuple[bytes, str]:
+    """Build a tarball with explicit member paths (for path-safety tests)."""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for path, content in paths:
+            info = tarfile.TarInfo(name=path)
+            info.size = len(content)
+            tar.addfile(info, io.BytesIO(content))
+    tarball = buf.getvalue()
+    import hashlib
+    sha = hashlib.sha256(tarball).hexdigest()
+    return tarball, sha
+
+
+def test_fetch_gui_extracts_index_html(tmp_path, gui_tarball_fixture):
+    tarball, sha = gui_tarball_fixture({"index.html": b"<html>hi</html>"})
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        fetch_gui(tmp_path)
+
+    out = tmp_path / "src" / "bsky_saves" / "_gui"
+    assert (out / "index.html").read_bytes() == b"<html>hi</html>"
+
+
+def test_fetch_gui_strips_dist_prefix(tmp_path):
+    tarball, sha = _make_tarball_with_paths([
+        ("dist/index.html", b"<html>prefixed</html>"),
+        ("dist/assets/x.js", b"console.log(1);"),
+    ])
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        fetch_gui(tmp_path)
+
+    out = tmp_path / "src" / "bsky_saves" / "_gui"
+    assert (out / "index.html").read_bytes() == b"<html>prefixed</html>"
+    assert (out / "assets" / "x.js").read_bytes() == b"console.log(1);"
+    assert not (out / "dist").exists()
+
+
+def test_fetch_gui_skips_cname(tmp_path):
+    tarball, sha = _make_tarball_with_paths([
+        ("index.html", b"<html>x</html>"),
+        ("CNAME", b"saves.lightseed.net"),
+    ])
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        fetch_gui(tmp_path)
+
+    out = tmp_path / "src" / "bsky_saves" / "_gui"
+    assert (out / "index.html").exists()
+    assert not (out / "CNAME").exists()
+
+
+def test_fetch_gui_rejects_tar_slip(tmp_path):
+    """A tarball with a member that escapes the extraction root must abort."""
+    tarball, sha = _make_tarball_with_paths([
+        ("../../../etc/passwd", b"root::0:0:...\n"),
+    ])
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        with pytest.raises(GuiFetchError) as exc_info:
+            fetch_gui(tmp_path)
+    assert "unsafe" in str(exc_info.value).lower() or "outside" in str(exc_info.value).lower()
