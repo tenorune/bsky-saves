@@ -184,3 +184,88 @@ def test_serve_static_or_spa_defers_all_documented_api_paths(tmp_path):
         result = serve_static_or_spa(h, api_path, gui)
         assert result is False, f"expected deferral for {api_path}"
         assert h.status is None, f"expected no response for {api_path}"
+
+
+# Expected CSP value (from MVP spec §4.6). Pin exactly.
+_EXPECTED_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'wasm-unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob: https:; "
+    "font-src 'self'; "
+    "connect-src 'self' https: http://127.0.0.1:* http://localhost:*; "
+    "worker-src 'self' blob:; "
+    "manifest-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+def test_serve_static_or_spa_assets_get_immutable_cache(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/assets/main-abc123.js", gui)
+    assert h.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+
+def test_serve_static_or_spa_index_gets_no_store(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/", gui)
+    assert h.headers["Cache-Control"] == "no-store"
+
+
+def test_serve_static_or_spa_spa_fallback_gets_no_store(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/some/spa/route", gui)
+    assert h.headers["Cache-Control"] == "no-store"
+
+
+def test_serve_static_or_spa_other_static_gets_no_cache(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    (gui / "manifest.webmanifest").write_bytes(b'{"name":"x"}')
+    h = _StubHandler()
+    serve_static_or_spa(h, "/manifest.webmanifest", gui)
+    assert h.headers["Cache-Control"] == "no-cache"
+
+
+def test_serve_static_or_spa_sends_csp(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/", gui)
+    assert h.headers["Content-Security-Policy"] == _EXPECTED_CSP
+
+
+def test_serve_static_or_spa_sends_x_frame_options(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/", gui)
+    assert h.headers["X-Frame-Options"] == "DENY"
+
+
+def test_serve_static_or_spa_sends_referrer_policy(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/", gui)
+    assert h.headers["Referrer-Policy"] == "no-referrer"
+
+
+def test_serve_static_or_spa_sends_coop(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/", gui)
+    assert h.headers["Cross-Origin-Opener-Policy"] == "same-origin"
+
+
+def test_serve_static_or_spa_head_sends_headers_no_body(tmp_path):
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    h.command = "HEAD"
+    serve_static_or_spa(h, "/assets/main-abc123.js", gui)
+    assert h.status == 200
+    assert h.headers["Content-Type"] == "application/javascript"
+    assert h.headers["Content-Length"] == str(len(b"console.log(1);"))
+    assert h.body == b""  # HEAD writes no body

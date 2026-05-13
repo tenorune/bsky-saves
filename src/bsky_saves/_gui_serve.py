@@ -37,6 +37,21 @@ def resolve_gui_root() -> Path:
     return root
 
 
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'wasm-unsafe-eval'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data: blob: https:; "
+    "font-src 'self'; "
+    "connect-src 'self' https: http://127.0.0.1:* http://localhost:*; "
+    "worker-src 'self' blob:; "
+    "manifest-src 'self'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "frame-ancestors 'none'"
+)
+
 # Documented API paths from serve.py's ROUTES table. Listed here for SPA
 # fallback decisions: if a GET request matches one of these and isn't a real
 # file in _gui/, defer to the caller's 404 path rather than serving index.html.
@@ -78,6 +93,20 @@ def content_type_for(path: Path) -> str:
     return _CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
 
+def _cache_control_for(rel_path: str, *, is_spa_fallback: bool) -> str:
+    """Return the Cache-Control value for a served file.
+
+    - SPA fallback or index.html: no-store (must always revalidate).
+    - /assets/*: immutable (Vite-hashed filenames).
+    - Everything else: no-cache (revalidate per request).
+    """
+    if is_spa_fallback or rel_path == "index.html":
+        return "no-store"
+    if rel_path.startswith("assets/"):
+        return "public, max-age=31536000, immutable"
+    return "no-cache"
+
+
 def serve_static_or_spa(handler, request_path: str, gui_root: Path) -> bool:
     """Try to serve a static file from gui_root for the given request path.
 
@@ -108,7 +137,7 @@ def serve_static_or_spa(handler, request_path: str, gui_root: Path) -> bool:
         return True
 
     if candidate.is_file():
-        _send_file(handler, candidate)
+        _send_file(handler, candidate, rel_path=rel, is_spa_fallback=False)
         return True
 
     # File doesn't exist. Two cases:
@@ -118,15 +147,26 @@ def serve_static_or_spa(handler, request_path: str, gui_root: Path) -> bool:
         return False
 
     index = gui_root / "index.html"
-    _send_file(handler, index)
+    _send_file(handler, index, rel_path="index.html", is_spa_fallback=True)
     return True
 
 
-def _send_file(handler, path: Path) -> None:
+def _send_file(
+    handler,
+    path: Path,
+    *,
+    rel_path: str,
+    is_spa_fallback: bool = False,
+) -> None:
     body = path.read_bytes()
     handler.send_response(200)
     handler.send_header("Content-Type", content_type_for(path))
     handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", _cache_control_for(rel_path, is_spa_fallback=is_spa_fallback))
+    handler.send_header("Content-Security-Policy", _CSP)
+    handler.send_header("X-Frame-Options", "DENY")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    handler.send_header("Cross-Origin-Opener-Policy", "same-origin")
     handler.end_headers()
     if getattr(handler, "command", "GET") != "HEAD":
         handler.wfile.write(body)
