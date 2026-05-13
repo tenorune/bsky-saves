@@ -229,3 +229,87 @@ def test_fetch_gui_rejects_tar_slip_sibling_prefix(tmp_path):
 
     # Critically: assert the attacker file was NOT written.
     assert not (tmp_path / "_guix" / "evil.txt").exists()
+
+
+def test_fetch_gui_writes_marker_on_success(tmp_path, gui_tarball_fixture):
+    tarball, sha = gui_tarball_fixture({"index.html": b"<html>x</html>"})
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        fetch_gui(tmp_path)
+
+    marker = tmp_path / "src" / "bsky_saves" / "_gui" / ".gui-version"
+    assert marker.exists()
+    lines = marker.read_text(encoding="utf-8").splitlines()
+    assert lines == ["0.5.3", sha]
+
+
+def test_fetch_gui_skips_download_when_marker_matches(tmp_path, gui_tarball_fixture):
+    """Idempotency: if marker matches pin, urlopen should not be called."""
+    tarball, sha = gui_tarball_fixture({"index.html": b"<html>x</html>"})
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    # Pre-populate _gui/ + marker so the idempotency check fires.
+    gui_dir = tmp_path / "src" / "bsky_saves" / "_gui"
+    gui_dir.mkdir(parents=True)
+    (gui_dir / "index.html").write_bytes(b"<html>cached</html>")
+    (gui_dir / ".gui-version").write_text(f"0.5.3\n{sha}\n", encoding="utf-8")
+
+    mock_urlopen = MagicMock()
+    with patch("scripts.fetch_gui.urllib.request.urlopen", mock_urlopen):
+        fetch_gui(tmp_path)
+
+    mock_urlopen.assert_not_called()
+    # Pre-existing content untouched.
+    assert (gui_dir / "index.html").read_bytes() == b"<html>cached</html>"
+
+
+def test_fetch_gui_refetches_when_version_bumped(tmp_path, gui_tarball_fixture):
+    """Marker has old version → re-fetch."""
+    tarball, sha = gui_tarball_fixture({"index.html": b"<html>new</html>"})
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    gui_dir = tmp_path / "src" / "bsky_saves" / "_gui"
+    gui_dir.mkdir(parents=True)
+    (gui_dir / "index.html").write_bytes(b"<html>old</html>")
+    (gui_dir / ".gui-version").write_text(f"0.5.2\n{sha}\n", encoding="utf-8")  # old version
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        fetch_gui(tmp_path)
+
+    assert (gui_dir / "index.html").read_bytes() == b"<html>new</html>"
+
+
+def test_fetch_gui_refetches_when_sha_bumped(tmp_path, gui_tarball_fixture):
+    """Marker has matching version but different sha → re-fetch."""
+    tarball, sha = gui_tarball_fixture({"index.html": b"<html>new</html>"})
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    gui_dir = tmp_path / "src" / "bsky_saves" / "_gui"
+    gui_dir.mkdir(parents=True)
+    (gui_dir / "index.html").write_bytes(b"<html>old</html>")
+    (gui_dir / ".gui-version").write_text(f"0.5.3\n{'b' * 64}\n", encoding="utf-8")  # different sha
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        fetch_gui(tmp_path)
+
+    assert (gui_dir / "index.html").read_bytes() == b"<html>new</html>"

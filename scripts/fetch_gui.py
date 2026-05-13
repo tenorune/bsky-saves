@@ -163,6 +163,23 @@ def fetch_gui(root: Path | None = None) -> None:
     version = read_gui_version(root)
     expected_sha = read_expected_sha256(root)
 
+    gui_dir = root / "src" / "bsky_saves" / "_gui"
+    marker = gui_dir / ".gui-version"
+
+    # Idempotency: skip download if marker matches pin.
+    if marker.exists():
+        try:
+            lines = marker.read_text(encoding="utf-8").splitlines()
+        except (UnicodeDecodeError, OSError):
+            lines = []
+        if len(lines) >= 2 and lines[0] == version and lines[1] == expected_sha:
+            print(
+                f"bsky-saves: GUI bundle v{version} already vendored "
+                f"(marker matches); skipping download.",
+                file=sys.stderr,
+            )
+            return
+
     data, actual_sha = _download(version)
     if actual_sha != expected_sha:
         raise GuiFetchError(
@@ -170,8 +187,8 @@ def fetch_gui(root: Path | None = None) -> None:
             f"got {actual_sha}"
         )
 
-    gui_dir = root / "src" / "bsky_saves" / "_gui"
     _extract_tarball(data, gui_dir)
+    marker.write_text(f"{version}\n{expected_sha}\n", encoding="utf-8")
 
     print(
         f"bsky-saves: vendored GUI bundle v{version} "
