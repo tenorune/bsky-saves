@@ -2074,3 +2074,27 @@ def test_fetch_image_rejects_redirect_to_non_bsky_host():
         )
     assert status == 400
     assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_log_request_escapes_control_chars(capsys):
+    """_log_request must escape terminal control bytes via
+    encode('ascii', 'backslashreplace') so a request with ESC bytes in the
+    path can't reposition the operator's terminal cursor."""
+    from bsky_saves.serve import make_handler
+
+    HandlerCls = make_handler(port=1, allow_origins=[], verbose=True)
+
+    # _log_request only reads self.command and self.path, so a minimal stub
+    # works. Calling the unbound method directly avoids the BaseHTTPRequestHandler
+    # initialization dance (sockets, request parsing, etc.).
+    class _Stub:
+        command = "GET"
+        path = "/ping\x1b[2J"
+
+    HandlerCls._log_request(_Stub())
+
+    captured = capsys.readouterr()
+    # The escape byte should appear as its escape sequence in stderr,
+    # not as the raw control byte.
+    assert "\\x1b" in captured.err
+    assert "\x1b" not in captured.err

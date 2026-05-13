@@ -552,8 +552,9 @@ def make_handler(
 
         def _log_request(self) -> None:
             if verbose:
+                safe_path = self.path.encode("unicode_escape").decode("ascii")
                 print(
-                    f"bsky-saves: {self.command} {self.path}",
+                    f"bsky-saves: {self.command} {safe_path}",
                     file=sys.stderr,
                 )
 
