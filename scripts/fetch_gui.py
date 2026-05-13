@@ -130,7 +130,7 @@ def _extract_tarball(data: bytes, dest: Path) -> None:
             if not name:
                 continue
             target = (dest / name).resolve()
-            if not str(target).startswith(str(dest)):
+            if not target.is_relative_to(dest):
                 raise GuiFetchError(
                     f"refusing to extract member outside dest: {m.name!r}"
                 )

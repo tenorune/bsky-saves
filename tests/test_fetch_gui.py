@@ -206,3 +206,26 @@ def test_fetch_gui_rejects_tar_slip(tmp_path):
         with pytest.raises(GuiFetchError) as exc_info:
             fetch_gui(tmp_path)
     assert "unsafe" in str(exc_info.value).lower() or "outside" in str(exc_info.value).lower()
+
+
+def test_fetch_gui_rejects_tar_slip_sibling_prefix(tmp_path):
+    """A tar member whose resolved path is a sibling directory sharing the
+    dest basename prefix (e.g. ../_guix/...) must be rejected."""
+    tarball, sha = _make_tarball_with_paths([
+        ("../_guix/evil.txt", b"pwned"),
+    ])
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        with pytest.raises(GuiFetchError) as exc_info:
+            fetch_gui(tmp_path)
+    assert "unsafe" in str(exc_info.value).lower() or "outside" in str(exc_info.value).lower()
+
+    # Critically: assert the attacker file was NOT written.
+    assert not (tmp_path / "_guix" / "evil.txt").exists()
