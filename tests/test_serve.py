@@ -2019,3 +2019,58 @@ def test_hydrate_threads_rejects_pds_pointing_at_private_ip():
             body=body,
         )
     assert status == 400
+
+
+@respx.mock
+def test_fetch_image_follows_safe_redirect_to_bsky_cdn():
+    # Set up a 302 within bsky.app → 200.
+    respx.get("https://cdn.bsky.app/img/a.jpg").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://cdn.bsky.app/img/b.jpg"}
+        )
+    )
+    respx.get("https://cdn.bsky.app/img/b.jpg").mock(
+        return_value=httpx.Response(
+            200, content=b"\xff\xd8\xff\xe0", headers={"Content-Type": "image/jpeg"}
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps(
+                {"url": "https://cdn.bsky.app/img/a.jpg"}
+            ).encode("utf-8"),
+        )
+    assert status == 200
+    assert headers["Content-Type"] == "image/jpeg"
+    assert body == b"\xff\xd8\xff\xe0"
+
+
+@respx.mock
+def test_fetch_image_rejects_redirect_to_non_bsky_host():
+    respx.get("https://cdn.bsky.app/img/a.jpg").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://evil.example/x.jpg"}
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps(
+                {"url": "https://cdn.bsky.app/img/a.jpg"}
+            ).encode("utf-8"),
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}

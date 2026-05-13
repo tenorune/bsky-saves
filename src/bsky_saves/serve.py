@@ -25,7 +25,7 @@ import httpx
 from . import __version__
 from .articles import _extract_article
 from .auth import create_session, refresh_session
-from ._net import UnsafeURLError, assert_public_http_url
+from ._net import UnsafeURLError, assert_public_http_url, safe_http_get
 from .fetch import (
     ENDPOINT_IDS,
     fetch_one_page,
@@ -81,13 +81,23 @@ def _handle_fetch_image(handler) -> None:
     if not _is_allowed_image_url(url):
         handler._send_json_error(400, "url not allowed")
         return
+
+    def enforce_bsky_cdn(u: str) -> None:
+        if not _is_allowed_image_url(u):
+            raise UnsafeURLError("not a bsky.app CDN URL")
+
     try:
-        r = httpx.get(
+        r = safe_http_get(
             url,
+            allow_http=False,
+            max_redirects=3,
+            hop_check=enforce_bsky_cdn,
             headers={"User-Agent": _IMAGE_USER_AGENT, "Accept": "image/*"},
-            follow_redirects=True,
             timeout=_IMAGE_TIMEOUT,
         )
+    except UnsafeURLError:
+        handler._send_json_error(400, "url not allowed")
+        return
     except Exception as e:
         handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
         return
