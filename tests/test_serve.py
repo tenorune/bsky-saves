@@ -24,20 +24,29 @@ DEFAULT_ORIGIN = "https://saves.lightseed.net"
 
 
 @contextlib.contextmanager
-def serve_in_background(allow_origins=(), verbose=False):
+def serve_in_background(allow_origins=(), verbose=False, gui=False):
     """Boot the daemon in a daemon thread on an ephemeral port; yield (port, server).
 
     allow_origins is the list of *additional* origins (equivalent to repeated
     --allow-origin flags). The default allowlist (_default_origins) is always
     prepended, matching run_serve behaviour after spec §4.4 additive change.
+
+    gui=True passes the resolved gui_root to make_handler, enabling static-file
+    serving. Tests that use gui=True should monkeypatch _gui_serve._gui_root_path
+    before entering this context manager.
     """
     # Bind port=0 first so the OS assigns an ephemeral port, then build the
     # handler with the actual port so Host-header validation works correctly.
     server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     port = server.server_address[1]
     full_origins = serve._default_origins(port) + list(allow_origins)
+    if gui:
+        from bsky_saves._gui_serve import resolve_gui_root
+        gui_root = resolve_gui_root()
+    else:
+        gui_root = None
     handler_cls = serve.make_handler(
-        port=port, allow_origins=full_origins, verbose=verbose
+        port=port, allow_origins=full_origins, verbose=verbose, gui_root=gui_root
     )
     server.RequestHandlerClass = handler_cls
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -2198,3 +2207,111 @@ def test_make_handler_accepts_gui_root_path(tmp_path):
         port=1, allow_origins=["https://x"], gui_root=tmp_path
     )
     assert handler_cls is not None
+
+
+# ---------------------------------------------------------------------------
+# Task 10: dispatcher integration tests (GET/HEAD through _gui_serve)
+# ---------------------------------------------------------------------------
+
+
+def _populate_gui_for_serve_test(tmp_path):
+    """Set up a minimal _gui/ that monkeypatched resolve_gui_root can return."""
+    gui = tmp_path / "_gui"
+    gui.mkdir()
+    (gui / "index.html").write_bytes(b"<html>integration</html>")
+    (gui / "assets").mkdir()
+    (gui / "assets" / "main-deadbeef.js").write_bytes(b"console.log('integration');")
+    return gui
+
+
+def test_serve_with_gui_mounts_index_at_root(tmp_path, monkeypatch):
+    gui = _populate_gui_for_serve_test(tmp_path)
+    from bsky_saves import _gui_serve
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, headers, body = _request(port, "/")
+
+    assert status == 200
+    assert body == b"<html>integration</html>"
+    assert headers["Content-Type"].startswith("text/html")
+    assert headers["Cache-Control"] == "no-store"
+
+
+def test_serve_with_gui_serves_assets(tmp_path, monkeypatch):
+    gui = _populate_gui_for_serve_test(tmp_path)
+    from bsky_saves import _gui_serve
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, headers, body = _request(port, "/assets/main-deadbeef.js")
+
+    assert status == 200
+    assert body == b"console.log('integration');"
+    assert headers["Content-Type"] == "application/javascript"
+    assert headers["Cache-Control"] == "public, max-age=31536000, immutable"
+
+
+def test_serve_with_gui_spa_fallback(tmp_path, monkeypatch):
+    gui = _populate_gui_for_serve_test(tmp_path)
+    from bsky_saves import _gui_serve
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, _, body = _request(port, "/some/spa/route")
+
+    assert status == 200
+    assert body == b"<html>integration</html>"
+
+
+def test_serve_with_gui_api_precedence(tmp_path, monkeypatch):
+    """Even with --gui, /ping returns JSON, not HTML."""
+    gui = _populate_gui_for_serve_test(tmp_path)
+    from bsky_saves import _gui_serve
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, headers, body = _request(port, "/ping")
+
+    assert status == 200
+    assert headers["Content-Type"] == "application/json"
+    assert b"bsky-saves" in body
+
+
+def test_serve_with_gui_post_to_root_is_404(tmp_path, monkeypatch):
+    """POST / is not a real API route and shouldn't serve static files."""
+    gui = _populate_gui_for_serve_test(tmp_path)
+    from bsky_saves import _gui_serve
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, _, _ = _request(
+            port, "/",
+            method="POST",
+            headers={"Content-Type": "application/json", "Origin": DEFAULT_ORIGIN},
+            body=b"{}",
+        )
+
+    assert status == 404
+
+
+def test_serve_without_gui_root_is_404(tmp_path):
+    """Without --gui, GET / returns the existing 404 (no static branch)."""
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(port, "/")
+    assert status == 404
+
+
+def test_serve_with_gui_unknown_api_path_404(tmp_path, monkeypatch):
+    """An undocumented API-looking path returns the JSON 404, not SPA index."""
+    gui = _populate_gui_for_serve_test(tmp_path)
+    from bsky_saves import _gui_serve
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, headers, body = _request(port, "/fetch-image")
+
+    # /fetch-image is a documented POST route. GET to it falls through to
+    # _gui_serve, which defers (api prefix), and lands at the JSON 404 path.
+    assert status == 404
+    assert headers["Content-Type"] == "application/json"

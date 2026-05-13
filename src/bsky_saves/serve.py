@@ -703,11 +703,20 @@ def make_handler(
             raise AttributeError(name)
 
         def _dispatch(self, method: str) -> None:
+            # Existing route table lookup (API takes precedence).
             handler = ROUTES.get((method, self.path))
-            if handler is None:
-                self._send_json_error(404, "not found")
+            if handler is not None:
+                handler(self)
                 return
-            handler(self)
+
+            # Static-file branch (only for GET and HEAD when --gui is on).
+            if gui is not None and method in ("GET", "HEAD"):
+                from ._gui_serve import serve_static_or_spa
+                if serve_static_or_spa(self, self.path, gui):
+                    return
+
+            # Fall through to the existing 404 JSON error.
+            self._send_json_error(404, "not found")
 
     return Handler
 
