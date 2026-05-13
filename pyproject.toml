@@ -45,5 +45,12 @@ bsky-saves = "bsky_saves.cli:main"
 # Bumping this requires updating gui-dist.sha256 from the same release.
 gui_version = "0.5.3"
 
+[tool.hatch.build]
+# _gui/ is gitignored (vendored at build time); explicitly include it in the wheel.
+artifacts = ["src/bsky_saves/_gui/**"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/bsky_saves"]
