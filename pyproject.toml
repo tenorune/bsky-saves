@@ -38,5 +38,12 @@ Issues = "https://github.com/tenorune/bsky-saves/issues"
 [project.scripts]
 bsky-saves = "bsky_saves.cli:main"
 
+[tool.bsky-saves]
+# Pinned bsky-saves-gui release. Scripts/fetch_gui.py downloads
+# dist.tar.gz from https://github.com/tenorune/bsky-saves-gui/releases/
+# download/v{gui_version}/dist.tar.gz and verifies it against gui-dist.sha256.
+# Bumping this requires updating gui-dist.sha256 from the same release.
+gui_version = "0.5.3"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/bsky_saves"]

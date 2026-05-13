@@ -9,3 +9,7 @@ build/
 .env
 .coverage
 htmlcov/
+
+# GUI bundle vendored by scripts/fetch_gui.py at build time.
+# Not source-tracked; ships in the built wheel via [tool.hatch.build] artifacts.
+src/bsky_saves/_gui/
