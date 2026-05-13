@@ -4,6 +4,13 @@ A toolkit for ingesting your own BlueSky bookmarks ("saves") into a portable
 JSON inventory, with optional hydration of linked article text, self-thread
 context, and CDN image downloads.
 
+Since v0.5.0 the package also ships the [bsky-saves-gui] static web app
+inside the wheel; `bsky-saves serve --gui` mounts it at `http://127.0.0.1:47826/`
+so a `pipx install bsky-saves` user can open a browser-based UI without
+provisioning anything else.
+
+[bsky-saves-gui]: https://github.com/tenorune/bsky-saves-gui
+
 ## Why
 
 The BlueSky web client lets you bookmark posts, but the saves are siloed
@@ -58,6 +65,9 @@ bsky-saves hydrate images --inventory ./saves_inventory.json --out ./images
 # Run a local HTTP helper daemon for bsky-saves-gui (CORS bridge).
 # Binds 127.0.0.1:47826; pass --allow-origin for self-hosted GUI deployments.
 bsky-saves serve
+
+# Same daemon, plus serve the bundled GUI itself at http://127.0.0.1:47826/.
+bsky-saves serve --gui
 ```
 
 All commands are **idempotent**: running them again skips already-hydrated
@@ -67,18 +77,20 @@ entries and adds only what's new. Failures are recorded inline (e.g.
 ## `bsky-saves serve`
 
 `bsky-saves serve` runs a small HTTP helper daemon on `127.0.0.1` that
-[bsky-saves-gui](https://github.com/tenorune/bsky-saves-gui) — a static web
-app running `bsky-saves` in Pyodide — calls to offload operations the
-browser can't do directly: fetching image bytes and arbitrary article URLs
-(both blocked by CORS), and routing bookmark enumeration, enrichment, and
-thread hydration through the helper instead of running them in Pyodide.
+[bsky-saves-gui] — a static web app running `bsky-saves` in Pyodide —
+calls to offload operations the browser can't do directly: fetching image
+bytes and arbitrary article URLs (both blocked by CORS), and routing
+bookmark enumeration, enrichment, and thread hydration through the helper
+instead of running them in Pyodide.
 
 ```
-bsky-saves serve [--port 47826] [--allow-origin https://saves.lightseed.net]... [--verbose]
+bsky-saves serve [--gui] [--port 47826] [--allow-origin ORIGIN]... [--verbose]
 ```
 
 The daemon binds only to `127.0.0.1`, writes nothing to disk, reads no
-config files, and exposes six endpoints:
+config files, validates the `Host` header to reject DNS-rebinding attempts
+(`421`), enforces an `Origin` allowlist (`403` for anything outside the
+defaults), caps request bodies at 10 MB, and exposes six endpoints:
 
 | Endpoint | Credentials | Purpose |
 |---|---|---|
@@ -94,6 +106,30 @@ in the request body; the daemon does its own `createSession` per request
 and never persists anything. `pds` defaults to `https://bsky.social` when
 absent. `/hydrate-threads` validates credentials (to fail-fast on a bad
 app password) but reads threads from the public AppView unauthenticated.
+
+The default `Origin` allowlist is `http://127.0.0.1:<port>`,
+`http://localhost:<port>`, and `https://saves.lightseed.net`. Pass
+`--allow-origin <url>` (repeatable) to **add** to this list — for example
+if you self-host the GUI at a custom URL. The flag is additive, not
+replacing.
+
+### `--gui` mode
+
+Pass `--gui` to also mount the bundled `bsky-saves-gui` static bundle at
+`/`. The GUI shares the same loopback port that serves the JSON API; API
+routes always take precedence over static files. Missing non-API paths
+fall back to the GUI's `index.html` so its SPA router takes over.
+
+`--gui` is opt-in. Without it, the daemon behaves as a JSON-only CORS
+bridge for the hosted GUI at `https://saves.lightseed.net` (the v0.4.x
+behaviour). With it, you don't need a hosted GUI deployment at all — open
+`http://127.0.0.1:47826/` directly. The wheel bundles a known-version GUI
+pinned at build time via SHA-256; bumping the pin requires a coordinated
+release with the `bsky-saves-gui` repo.
+
+If `--gui` is passed but the bundled GUI is missing (e.g. a broken
+install or an sdist build that didn't run the vendor hook), the daemon
+exits with code 2 and a clear error.
 
 The full HTTP API contracts live in the consumer repo:
 
