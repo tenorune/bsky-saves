@@ -2173,7 +2173,7 @@ def test_host_missing_returns_421():
 
 
 # ---------------------------------------------------------------------------
-# --gui flag: startup guard and make_handler gui_root parameter (Task 9)
+# --gui flag: startup guard and make_handler gui_root parameter
 # ---------------------------------------------------------------------------
 
 def test_run_serve_with_gui_missing_returns_2(tmp_path, monkeypatch, capsys):
@@ -2210,7 +2210,7 @@ def test_make_handler_accepts_gui_root_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 10: dispatcher integration tests (GET/HEAD through _gui_serve)
+# Dispatcher integration tests (GET/HEAD through _gui_serve)
 # ---------------------------------------------------------------------------
 
 

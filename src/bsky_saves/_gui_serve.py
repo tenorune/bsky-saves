@@ -1,7 +1,7 @@
 """Static-file serving for `bsky-saves serve --gui`.
 
 All static-file logic lives here so `serve.py` stays focused on the JSON API.
-The dispatcher in `serve.py` calls `serve_static_or_spa` (added in Task 6) as
+The dispatcher in `serve.py` calls `serve_static_or_spa` as
 one branch off the existing route table.
 """
 from __future__ import annotations
@@ -111,8 +111,8 @@ def serve_static_or_spa(handler, request_path: str, gui_root: Path) -> bool:
     """Try to serve a static file from gui_root for the given request path.
 
     Returns True if a response was sent (200 with file bytes, or 404). Returns
-    False to defer to the caller (used in Task 7 for API-prefix paths that
-    should yield a JSON 404 rather than an SPA fallback).
+    False to defer to the caller for documented API-prefix paths that should
+    yield a JSON 404 rather than an SPA fallback.
 
     Args:
         handler: A BaseHTTPRequestHandler-like object with send_response,

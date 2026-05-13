@@ -71,9 +71,7 @@ def test_fetch_gui_downloads_and_verifies(tmp_path, gui_tarball_fixture, monkeyp
     mock_response.__enter__.return_value = mock_response
 
     with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
-        # Note: extraction is added in Task 3; for now we only verify that
-        # fetch_gui completes without raising on byte verification.
-        # (Tarball is *not* extracted yet in Task 2's implementation.)
+        # Happy-path: bytes match the pinned sha; fetch_gui returns normally.
         fetch_gui(tmp_path)
 
 
