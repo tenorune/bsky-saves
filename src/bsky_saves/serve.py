@@ -42,6 +42,10 @@ from .threads import (
 from .tid import rkey_of, decode_tid_to_iso
 
 
+_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB uniform cap on every POST body.
+_BODY_REJECTED: object = object()    # Sentinel for "413 already sent."
+
+
 def _handle_ping(handler) -> None:
     handler._send_json(
         200,
@@ -67,6 +71,8 @@ def _is_allowed_image_url(url: str) -> bool:
 
 def _handle_fetch_image(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     url = (body or {}).get("url")
     if not isinstance(url, str) or not url:
         handler._send_json_error(400, "missing url")
@@ -93,6 +99,8 @@ def _handle_fetch_image(handler) -> None:
 
 def _handle_extract_article(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     url = (body or {}).get("url")
     if not isinstance(url, str) or not url:
         handler._send_json_error(400, "missing url")
@@ -132,6 +140,8 @@ def _handle_extract_article(handler) -> None:
 
 def _handle_fetch(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     creds = _validate_creds((body or {}).get("credentials"))
     if creds is None:
         handler._send_json_error(400, "missing credentials")
@@ -277,6 +287,8 @@ def _handle_fetch(handler) -> None:
 
 def _handle_enrich(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     uris = (body or {}).get("uris")
     if not isinstance(uris, list):
         handler._send_json_error(400, "missing uris")
@@ -310,6 +322,8 @@ def _now_iso() -> str:
 
 def _handle_hydrate_threads(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     creds = _validate_creds((body or {}).get("credentials"))
     if creds is None:
         handler._send_json_error(400, "missing credentials")
@@ -561,11 +575,22 @@ def make_handler(
             self.end_headers()
             self.wfile.write(body)
 
-        def _read_json_body(self) -> dict | None:
+        def _read_json_body(self) -> dict | None | object:
+            """Read and parse the JSON request body.
+
+            Returns:
+                - dict: successfully parsed body.
+                - None: body missing, empty, malformed, or not a dict; caller sends 400.
+                - _BODY_REJECTED: Content-Length exceeded 10 MB; this method already
+                  sent 413. Caller must return without sending another response.
+            """
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except (TypeError, ValueError):
                 return None
+            if length > _MAX_BODY_BYTES:
+                self._send_json_error(413, "request too large")
+                return _BODY_REJECTED
             if length <= 0:
                 return None
             try:

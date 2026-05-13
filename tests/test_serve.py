@@ -1866,3 +1866,58 @@ def test_host_trailing_dot_returns_421():
             port, "/ping", headers={"Host": f"localhost.:{port}"}
         )
     assert status == 421
+
+
+def test_body_at_cap_succeeds():
+    """A body well under the 10 MB cap is processed normally."""
+    payload = json.dumps({"uris": ["at://x"] * 1000}).encode("utf-8")
+    assert len(payload) < 10 * 1024 * 1024
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port,
+            "/enrich",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=payload,
+        )
+    # /enrich tolerates invalid URIs and returns 200 with errors[].
+    assert status == 200
+
+
+def test_body_over_cap_returns_413():
+    """A body over 10 MB is rejected with 413."""
+    # ~11 MB of well-formed JSON. The exact byte count just needs to exceed
+    # 10 * 1024 * 1024 = 10,485,760 bytes.
+    import http.client
+    payload = b'{"uris":[' + b'"x",' * 2_700_000 + b'"y"]}'
+    assert len(payload) > 10 * 1024 * 1024
+    with serve_in_background() as (port, _):
+        # Use http.client directly so we can read the 413 response even if
+        # the server closes the connection before we finish sending the body.
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request(
+                "POST",
+                "/enrich",
+                body=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": DEFAULT_ORIGIN,
+                    "Host": f"127.0.0.1:{port}",
+                },
+            )
+            resp = conn.getresponse()
+            status = resp.status
+            body = resp.read()
+        except (BrokenPipeError, ConnectionResetError):
+            # Server closed after sending 413; read whatever was buffered.
+            resp = conn.getresponse()
+            status = resp.status
+            body = resp.read()
+        finally:
+            conn.close()
+    assert status == 413
+    assert json.loads(body) == {"error": "request too large"}
