@@ -1,6 +1,10 @@
 """Shared pytest fixtures for the bsky-saves test suite."""
 from __future__ import annotations
 
+import hashlib
+import io
+import tarfile
+
 import pytest
 
 
@@ -62,6 +66,27 @@ def make_entry(
 
 def make_inventory(*entries: dict) -> dict:
     return {"fetched_at": "2026-04-27T10:14:00Z", "saves": list(entries)}
+
+
+@pytest.fixture
+def gui_tarball_fixture():
+    """Factory yielding (tarball_bytes, sha256_hex) for an in-memory GUI bundle.
+
+    Usage in tests:
+        tarball, sha = gui_tarball_fixture({"index.html": b"<html>...</html>"})
+    """
+    def _make(files: dict[str, bytes]) -> tuple[bytes, str]:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+            for name, content in files.items():
+                info = tarfile.TarInfo(name=name)
+                info.size = len(content)
+                tar.addfile(info, io.BytesIO(content))
+        tarball = buf.getvalue()
+        sha = hashlib.sha256(tarball).hexdigest()
+        return tarball, sha
+
+    return _make
 
 
 @pytest.fixture

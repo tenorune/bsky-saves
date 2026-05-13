@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bsky-saves"
-version = "0.4.4"
+version = "0.5.0"
 description = "BlueSky bookmarks ingestion toolkit: fetch, hydrate (article text, self-thread context, images), and merge into a JSON inventory."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -37,6 +37,20 @@ Issues = "https://github.com/tenorune/bsky-saves/issues"
 
 [project.scripts]
 bsky-saves = "bsky_saves.cli:main"
+
+[tool.bsky-saves]
+# Pinned bsky-saves-gui release. Scripts/fetch_gui.py downloads
+# dist.tar.gz from https://github.com/tenorune/bsky-saves-gui/releases/
+# download/v{gui_version}/dist.tar.gz and verifies it against gui-dist.sha256.
+# Bumping this requires updating gui-dist.sha256 from the same release.
+gui_version = "0.5.3"
+
+[tool.hatch.build]
+# _gui/ is gitignored (vendored at build time); explicitly include it in the wheel.
+artifacts = ["src/bsky_saves/_gui/**"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bsky_saves"]

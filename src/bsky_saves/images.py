@@ -18,8 +18,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
-import httpx
-
 from . import __version__
 from ._io import atomic_write_inventory
 from ._net import safe_http_get

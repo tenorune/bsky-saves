@@ -17,6 +17,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
@@ -540,12 +541,14 @@ def make_handler(
     port: int,
     allow_origins: list[str],
     verbose: bool = False,
+    gui_root: Path | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build a BaseHTTPRequestHandler subclass that closes over port,
     allow_origins and verbose. Returning a class (not an instance) is what
     BaseHTTPRequestHandler expects from ThreadingHTTPServer."""
 
     origins = list(allow_origins)
+    gui = gui_root  # closure-captured for use in _dispatch (Task 10)
 
     class Handler(BaseHTTPRequestHandler):
         # Suppress the default "127.0.0.1 - - [...] GET /ping" log line; we
@@ -700,11 +703,20 @@ def make_handler(
             raise AttributeError(name)
 
         def _dispatch(self, method: str) -> None:
+            # Existing route table lookup (API takes precedence).
             handler = ROUTES.get((method, self.path))
-            if handler is None:
-                self._send_json_error(404, "not found")
+            if handler is not None:
+                handler(self)
                 return
-            handler(self)
+
+            # Static-file branch (only for GET and HEAD when --gui is on).
+            if gui is not None and method in ("GET", "HEAD"):
+                from ._gui_serve import serve_static_or_spa
+                if serve_static_or_spa(self, self.path, gui):
+                    return
+
+            # Fall through to the existing 404 JSON error.
+            self._send_json_error(404, "not found")
 
     return Handler
 
@@ -723,10 +735,24 @@ def run_serve(
     port: int = 47826,
     allow_origins: list[str] | None = None,
     verbose: bool = False,
+    gui: bool = False,
 ) -> int:
     """Start the daemon. Blocks until Ctrl-C. Returns an exit code."""
+    gui_root: Path | None = None
+    if gui:
+        from ._gui_serve import GuiNotInstalledError, resolve_gui_root
+        try:
+            gui_root = resolve_gui_root()
+        except GuiNotInstalledError as e:
+            print(
+                f"bsky-saves: --gui requires the bundled GUI tarball; "
+                f"{e}. Reinstall from a wheel (pip install bsky-saves) "
+                f"or run scripts/fetch_gui.py.",
+                file=sys.stderr,
+            )
+            return 2
     origins = _default_origins(port) + list(allow_origins or [])
-    handler_cls = make_handler(port=port, allow_origins=origins, verbose=verbose)
+    handler_cls = make_handler(port=port, allow_origins=origins, verbose=verbose, gui_root=gui_root)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
     except OSError as e:

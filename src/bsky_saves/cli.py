@@ -136,6 +136,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Log each request to stderr.",
     )
+    p_serve.add_argument(
+        "--gui",
+        action="store_true",
+        default=False,
+        help="Also serve the bundled GUI from / on the same port. "
+             "Requires the wheel-bundled _gui/ tree (or a local fetch via "
+             "scripts/fetch_gui.py).",
+    )
 
     return parser
 
@@ -197,6 +205,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             allow_origins=args.allow_origin or [],
             verbose=args.verbose,
+            gui=args.gui,
         )
 
     return 2
