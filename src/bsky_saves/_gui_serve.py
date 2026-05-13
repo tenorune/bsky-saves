@@ -7,6 +7,7 @@ one branch off the existing route table.
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 
 class GuiNotInstalledError(Exception):
@@ -62,3 +63,60 @@ _CONTENT_TYPES = {
 def content_type_for(path: Path) -> str:
     """Best-effort Content-Type for a file path; falls back to octet-stream."""
     return _CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream")
+
+
+def serve_static_or_spa(handler, request_path: str, gui_root: Path) -> bool:
+    """Try to serve a static file from gui_root for the given request path.
+
+    Returns True if a response was sent (200 with file bytes, or 404). Returns
+    False to defer to the caller (used in Task 7 for API-prefix paths that
+    should yield a JSON 404 rather than an SPA fallback).
+
+    Args:
+        handler: A BaseHTTPRequestHandler-like object with send_response,
+            send_header, end_headers, and a `wfile` attribute supporting write.
+        request_path: The request URL path (may contain a query string).
+        gui_root: The resolved _gui/ directory.
+    """
+    # Strip query string; URL-decode.
+    parsed_path = urlsplit(request_path).path
+    decoded = unquote(parsed_path)
+
+    # Resolve candidate path. Root → index.html.
+    rel = decoded.lstrip("/")
+    if rel == "":
+        rel = "index.html"
+
+    candidate = (gui_root / rel).resolve()
+    gui_root_resolved = gui_root.resolve()
+    # Path-traversal defence: candidate must be under gui_root (or be gui_root itself).
+    if not candidate.is_relative_to(gui_root_resolved):
+        _send_404(handler)
+        return True
+
+    if candidate.is_file():
+        _send_file(handler, candidate)
+        return True
+
+    # File doesn't exist. Task 7 extends this with SPA fallback + API prefix.
+    _send_404(handler)
+    return True
+
+
+def _send_file(handler, path: Path) -> None:
+    body = path.read_bytes()
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type_for(path))
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    if getattr(handler, "command", "GET") != "HEAD":
+        handler.wfile.write(body)
+
+
+def _send_404(handler) -> None:
+    handler.send_response(404)
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    handler.send_header("Content-Length", "9")
+    handler.end_headers()
+    if getattr(handler, "command", "GET") != "HEAD":
+        handler.wfile.write(b"not found")
