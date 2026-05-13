@@ -547,12 +547,18 @@ def make_handler(
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Max-Age", "600")
 
+        def _security_headers(self) -> None:
+            """Headers applied to every response. Tightly bounded defense-in-depth."""
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+
         def _send_json(self, code: int, payload: dict) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self._cors_headers()
+            self._security_headers()
             self.end_headers()
             self.wfile.write(body)
 
@@ -572,6 +578,7 @@ def make_handler(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self._cors_headers()
+            self._security_headers()
             self.end_headers()
             self.wfile.write(body)
 
@@ -638,6 +645,7 @@ def make_handler(
                 return
             self.send_response(204)
             self._cors_headers()
+            self._security_headers()
             self.end_headers()
 
         def do_GET(self) -> None:

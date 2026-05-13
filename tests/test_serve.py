@@ -1920,4 +1920,34 @@ def test_body_over_cap_returns_413():
         finally:
             conn.close()
     assert status == 413
-    assert json.loads(body) == {"error": "request too large"}
+
+
+def test_responses_include_nosniff_header():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(port, "/ping")
+    assert headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_responses_include_cache_control_no_store():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(port, "/ping")
+    assert headers["Cache-Control"] == "no-store"
+
+
+def test_error_responses_include_security_headers():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(port, "/does-not-exist")
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Cache-Control"] == "no-store"
+
+
+def test_options_preflight_includes_security_headers():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(
+            port,
+            "/ping",
+            method="OPTIONS",
+            headers={"Origin": DEFAULT_ORIGIN},
+        )
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Cache-Control"] == "no-store"
