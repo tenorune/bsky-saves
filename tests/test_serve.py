@@ -2161,3 +2161,40 @@ def test_host_missing_returns_421():
             sock.close()
     first_line = response.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
     assert " 421 " in first_line, f"Got: {first_line!r}"
+
+
+# ---------------------------------------------------------------------------
+# --gui flag: startup guard and make_handler gui_root parameter (Task 9)
+# ---------------------------------------------------------------------------
+
+def test_run_serve_with_gui_missing_returns_2(tmp_path, monkeypatch, capsys):
+    """run_serve(gui=True) with empty _gui/ exits 2 with actionable message."""
+    from bsky_saves.serve import run_serve
+    from bsky_saves import _gui_serve
+
+    # Point _gui_root_path at an empty directory.
+    empty_gui = tmp_path / "_gui"
+    empty_gui.mkdir()
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: empty_gui)
+
+    exit_code = run_serve(port=0, gui=True)
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "--gui requires" in captured.err
+    assert "fetch_gui.py" in captured.err
+
+
+def test_make_handler_accepts_gui_root_none():
+    """make_handler should accept gui_root=None (the default behavior)."""
+    from bsky_saves.serve import make_handler
+    handler_cls = make_handler(port=1, allow_origins=["https://x"], gui_root=None)
+    assert handler_cls is not None
+
+
+def test_make_handler_accepts_gui_root_path(tmp_path):
+    """make_handler accepts a populated _gui/ path."""
+    from bsky_saves.serve import make_handler
+    handler_cls = make_handler(
+        port=1, allow_origins=["https://x"], gui_root=tmp_path
+    )
+    assert handler_cls is not None
