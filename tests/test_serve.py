@@ -2098,3 +2098,66 @@ def test_log_request_escapes_control_chars(capsys):
     # not as the raw control byte.
     assert "\\x1b" in captured.err
     assert "\x1b" not in captured.err
+
+
+def test_extract_article_rejects_loopback_url_returns_400():
+    """The HTTP endpoint returns 400 {"error":"url not allowed"} for SSRF-blocked
+    URLs. The articles._extract_article helper returns
+    "fetch_error:UnsafeURLError:..." and the handler maps it to 400, distinct
+    from the generic 502 used for other fetch_error: variants."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps({"url": "http://127.0.0.1/secret"}).encode("utf-8"),
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_extract_article_rejects_metadata_ip_returns_400():
+    """AWS-style metadata IP gets the same 400 url-not-allowed treatment."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps(
+                {"url": "http://169.254.169.254/latest/meta-data/"}
+            ).encode("utf-8"),
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_host_missing_returns_421():
+    """Empty/missing Host header is rejected by the security gate.
+
+    Python's http.client always sends a Host header, so we use raw socket
+    I/O to construct an HTTP/1.0 request without one.
+    """
+    import socket
+    with serve_in_background() as (port, _):
+        sock = socket.create_connection(("127.0.0.1", port))
+        try:
+            sock.sendall(b"GET /ping HTTP/1.0\r\n\r\n")
+            chunks = []
+            while True:
+                buf = sock.recv(4096)
+                if not buf:
+                    break
+                chunks.append(buf)
+            response = b"".join(chunks)
+        finally:
+            sock.close()
+    first_line = response.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+    assert " 421 " in first_line, f"Got: {first_line!r}"

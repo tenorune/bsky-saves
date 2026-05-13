@@ -130,6 +130,9 @@ def _handle_extract_article(handler) -> None:
                 code = 502
             handler._send_json_error(code, f"upstream {code}")
             return
+        if error.startswith("fetch_error:UnsafeURLError:"):
+            handler._send_json_error(400, "url not allowed")
+            return
         if error.startswith("fetch_error:"):
             handler._send_json_error(502, error)
             return
