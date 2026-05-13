@@ -1,0 +1,73 @@
+name: smoke
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      gui_pin_corrupt:
+        description: 'Corrupt gui-dist.sha256 (negative-pin test; build should fail)'
+        type: boolean
+        default: false
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Optionally corrupt the GUI pin
+        if: ${{ github.event.inputs.gui_pin_corrupt == 'true' }}
+        run: |
+          # Flip the first hex character so SHA-256 verification fails.
+          sed -i 's/^./0/' gui-dist.sha256
+          cat gui-dist.sha256
+
+      - name: Build the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Install in fresh venv
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/pip install dist/bsky_saves-*-py3-none-any.whl
+
+      - name: Start daemon
+        run: |
+          /tmp/smoke/bin/bsky-saves serve --gui --port 47826 &
+          echo $! > /tmp/smoke-pid
+          sleep 1
+
+      - name: Smoke / endpoint
+        run: |
+          curl -fsS http://127.0.0.1:47826/ | grep -q '<title>'
+
+      - name: Smoke /ping endpoint
+        run: |
+          curl -fsS http://127.0.0.1:47826/ping | \
+            python -c 'import sys, json; d = json.load(sys.stdin); assert d["name"] == "bsky-saves", d'
+
+      - name: Smoke /assets/* endpoint
+        run: |
+          ASSET_DIR="/tmp/smoke/lib/python3.11/site-packages/bsky_saves/_gui/assets"
+          ASSET=$(ls "$ASSET_DIR" | head -1)
+          echo "Testing /assets/$ASSET"
+          curl -fsS "http://127.0.0.1:47826/assets/$ASSET" > /dev/null
+
+      - name: Smoke /fetch-image rejection
+        run: |
+          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+              http://127.0.0.1:47826/fetch-image \
+              -H 'Content-Type: application/json' \
+              -H "Origin: http://127.0.0.1:47826" \
+              -d '{"url":"https://evil.com/x.png"}')
+          test "$STATUS" = "400" || { echo "expected 400, got $STATUS"; exit 1; }
+
+      - name: Kill daemon
+        if: always()
+        run: kill "$(cat /tmp/smoke-pid)" || true
