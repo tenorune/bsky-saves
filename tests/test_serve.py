@@ -12,7 +12,7 @@ import socket
 import threading
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 import respx
@@ -24,13 +24,22 @@ DEFAULT_ORIGIN = "https://saves.lightseed.net"
 
 
 @contextlib.contextmanager
-def serve_in_background(allow_origins=(DEFAULT_ORIGIN,), verbose=False):
-    """Boot the daemon in a daemon thread on an ephemeral port; yield (port, server)."""
-    handler_cls = serve.make_handler(
-        allow_origins=list(allow_origins), verbose=verbose
-    )
-    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+def serve_in_background(allow_origins=(), verbose=False):
+    """Boot the daemon in a daemon thread on an ephemeral port; yield (port, server).
+
+    allow_origins is the list of *additional* origins (equivalent to repeated
+    --allow-origin flags). The default allowlist (_default_origins) is always
+    prepended, matching run_serve behaviour after spec §4.4 additive change.
+    """
+    # Bind port=0 first so the OS assigns an ephemeral port, then build the
+    # handler with the actual port so Host-header validation works correctly.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     port = server.server_address[1]
+    full_origins = serve._default_origins(port) + list(allow_origins)
+    handler_cls = serve.make_handler(
+        port=port, allow_origins=full_origins, verbose=verbose
+    )
+    server.RequestHandlerClass = handler_cls
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -113,16 +122,15 @@ def test_cors_allowed_origin_echoed_on_normal_response():
     assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
 
 
-def test_cors_disallowed_origin_omits_allow_origin_header():
+def test_cors_disallowed_origin_returns_403():
+    """Non-allowlisted origins receive an explicit 403, not just a missing
+    Allow-Origin header."""
     with serve_in_background() as (port, _):
-        status, headers, _ = _request(
+        status, _, body = _request(
             port, "/ping", headers={"Origin": "https://evil.example"}
         )
-    assert status == 200
-    assert "Access-Control-Allow-Origin" not in headers
-    # Other CORS headers still present (CORS is a browser-side mechanism;
-    # absence of Allow-Origin is what fails the request closed).
-    assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+    assert status == 403
+    assert json.loads(body) == {"error": "Origin not allowed"}
 
 
 def test_cors_no_origin_header_request_succeeds():
@@ -358,35 +366,100 @@ def test_extract_article_network_error_returns_502():
     assert "error" in json.loads(body)
 
 
-def test_allow_origin_override_replaces_default():
-    """Custom allow_origins fully replaces the default list."""
-    custom = "https://other.example"
+def test_allow_origin_additive_keeps_defaults():
+    """Custom --allow-origin entries are added to (not replace) the default
+    allowlist. The default origin (https://saves.lightseed.net) must still
+    be allowed after passing --allow-origin."""
+    custom = "https://custom.example"
     with serve_in_background(allow_origins=(custom,)) as (port, _):
-        # Default origin must NOT be allowed.
-        _, headers_default, _ = _request(
+        # Default origin still allowed.
+        status_default, h_default, _ = _request(
             port, "/ping", headers={"Origin": DEFAULT_ORIGIN}
         )
-        assert "Access-Control-Allow-Origin" not in headers_default
-
-        # Custom origin must be allowed.
-        _, headers_custom, _ = _request(
+        # Custom origin allowed.
+        status_custom, h_custom, _ = _request(
             port, "/ping", headers={"Origin": custom}
         )
-        assert headers_custom["Access-Control-Allow-Origin"] == custom
+        # Unlisted origin still rejected.
+        status_other, _, _ = _request(
+            port, "/ping", headers={"Origin": "https://unlisted.example"}
+        )
+    assert status_default == 200
+    assert h_default["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+    assert status_custom == 200
+    assert h_custom["Access-Control-Allow-Origin"] == custom
+    assert status_other == 403
+
+
+def test_default_allowlist_includes_loopback_origins():
+    """The default allowlist now includes http://127.0.0.1:<port> and
+    http://localhost:<port> in addition to https://saves.lightseed.net."""
+    with serve_in_background() as (port, _):
+        loopback_v4 = f"http://127.0.0.1:{port}"
+        loopback_dns = f"http://localhost:{port}"
+        status_v4, h_v4, _ = _request(
+            port, "/ping", headers={"Origin": loopback_v4}
+        )
+        status_dns, h_dns, _ = _request(
+            port, "/ping", headers={"Origin": loopback_dns}
+        )
+    assert status_v4 == 200
+    assert h_v4["Access-Control-Allow-Origin"] == loopback_v4
+    assert status_dns == 200
+    assert h_dns["Access-Control-Allow-Origin"] == loopback_dns
 
 
 def test_multiple_allow_origins_all_allowed():
     a = "https://a.example"
     b = "https://b.example"
     with serve_in_background(allow_origins=(a, b)) as (port, _):
-        _, h_a, _ = _request(port, "/ping", headers={"Origin": a})
-        _, h_b, _ = _request(port, "/ping", headers={"Origin": b})
-        _, h_other, _ = _request(
+        status_a, h_a, _ = _request(port, "/ping", headers={"Origin": a})
+        status_b, h_b, _ = _request(port, "/ping", headers={"Origin": b})
+        status_c, _, body_c = _request(
             port, "/ping", headers={"Origin": "https://c.example"}
         )
+    assert status_a == 200
     assert h_a["Access-Control-Allow-Origin"] == a
+    assert status_b == 200
     assert h_b["Access-Control-Allow-Origin"] == b
-    assert "Access-Control-Allow-Origin" not in h_other
+    assert status_c == 403
+    assert json.loads(body_c) == {"error": "Origin not allowed"}
+
+
+def test_options_preflight_from_disallowed_origin_returns_403():
+    """Spec §4.4: OPTIONS from disallowed origin also returns 403, not 204."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="OPTIONS",
+            headers={"Origin": "https://evil.example"},
+        )
+    assert status == 403
+    assert json.loads(body) == {"error": "Origin not allowed"}
+
+
+def test_options_preflight_from_allowed_origin_returns_204():
+    """Allowed origin still gets the 204 with echoed Allow-Origin."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port,
+            "/fetch-image",
+            method="OPTIONS",
+            headers={"Origin": DEFAULT_ORIGIN},
+        )
+    assert status == 204
+    assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+
+
+def test_ping_origin_disallowed_returns_403():
+    """Spec §5.1 (post-2026-05-12 revision): /ping enforces Origin like every
+    other endpoint."""
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Origin": "https://attacker.example"}
+        )
+    assert status == 403
 
 
 def test_verbose_logs_request_to_stderr(capfd):
@@ -1741,3 +1814,350 @@ def test_hydrate_threads_neither_password_nor_jwt_returns_400():
         )
     assert status == 400
     assert json.loads(body) == {"error": "missing credentials"}
+
+
+# --- v0.4.4: Host header validation (DNS-rebinding protection) ---
+
+
+def test_host_loopback_with_correct_port_accepted():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"127.0.0.1:{port}"}
+        )
+    assert status == 200
+
+
+def test_host_localhost_with_correct_port_accepted():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"localhost:{port}"}
+        )
+    assert status == 200
+
+
+def test_host_unknown_domain_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port, "/ping", headers={"Host": "evil.example.com"}
+        )
+    assert status == 421
+    assert json.loads(body) == {"error": "misdirected request"}
+
+
+def test_host_wrong_port_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"127.0.0.1:{port + 1}"}
+        )
+    assert status == 421
+
+
+def test_host_ipv6_brackets_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"[::1]:{port}"}
+        )
+    assert status == 421
+
+
+def test_host_trailing_dot_returns_421():
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/ping", headers={"Host": f"localhost.:{port}"}
+        )
+    assert status == 421
+
+
+def test_body_at_cap_succeeds():
+    """A body well under the 10 MB cap is processed normally."""
+    payload = json.dumps({"uris": ["at://x"] * 1000}).encode("utf-8")
+    assert len(payload) < 10 * 1024 * 1024
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port,
+            "/enrich",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=payload,
+        )
+    # /enrich tolerates invalid URIs and returns 200 with errors[].
+    assert status == 200
+
+
+def test_body_over_cap_returns_413():
+    """A body over 10 MB is rejected with 413."""
+    # ~11 MB of well-formed JSON. The exact byte count just needs to exceed
+    # 10 * 1024 * 1024 = 10,485,760 bytes.
+    import http.client
+    payload = b'{"uris":[' + b'"x",' * 2_700_000 + b'"y"]}'
+    assert len(payload) > 10 * 1024 * 1024
+    with serve_in_background() as (port, _):
+        # Use http.client directly so we can read the 413 response even if
+        # the server closes the connection before we finish sending the body.
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        try:
+            conn.request(
+                "POST",
+                "/enrich",
+                body=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Origin": DEFAULT_ORIGIN,
+                    "Host": f"127.0.0.1:{port}",
+                },
+            )
+            resp = conn.getresponse()
+            status = resp.status
+            body = resp.read()
+        except (BrokenPipeError, ConnectionResetError):
+            # Server closed after sending 413; read whatever was buffered.
+            resp = conn.getresponse()
+            status = resp.status
+            body = resp.read()
+        finally:
+            conn.close()
+    assert status == 413
+
+
+def test_responses_include_nosniff_header():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(port, "/ping")
+    assert headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_responses_include_cache_control_no_store():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(port, "/ping")
+    assert headers["Cache-Control"] == "no-store"
+
+
+def test_error_responses_include_security_headers():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(port, "/does-not-exist")
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Cache-Control"] == "no-store"
+
+
+def test_options_preflight_includes_security_headers():
+    with serve_in_background() as (port, _):
+        _, headers, _ = _request(
+            port,
+            "/ping",
+            method="OPTIONS",
+            headers={"Origin": DEFAULT_ORIGIN},
+        )
+    assert headers["X-Content-Type-Options"] == "nosniff"
+    assert headers["Cache-Control"] == "no-store"
+
+
+def test_fetch_rejects_pds_pointing_at_loopback():
+    body = {
+        "credentials": {
+            "handle": "user.bsky.social",
+            "app_password": "xxxx-xxxx-xxxx-xxxx",
+            "pds": "http://127.0.0.1:8080",
+        }
+    }
+    with serve_in_background() as (port, _):
+        status, _, body_resp = _request(
+            port,
+            "/fetch",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=body,
+        )
+    assert status == 400
+    assert json.loads(body_resp) == {"error": "missing credentials"}
+
+
+def test_fetch_rejects_pds_pointing_at_metadata_ip():
+    body = {
+        "credentials": {
+            "handle": "user.bsky.social",
+            "app_password": "xxxx-xxxx-xxxx-xxxx",
+            "pds": "https://169.254.169.254",
+        }
+    }
+    with serve_in_background() as (port, _):
+        status, _, body_resp = _request(
+            port,
+            "/fetch",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=body,
+        )
+    assert status == 400
+
+
+def test_hydrate_threads_rejects_pds_pointing_at_private_ip():
+    body = {
+        "uris": ["at://example/post/1"],
+        "credentials": {
+            "handle": "user.bsky.social",
+            "app_password": "xxxx-xxxx-xxxx-xxxx",
+            "pds": "https://10.0.0.1",
+        },
+    }
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=body,
+        )
+    assert status == 400
+
+
+@respx.mock
+def test_fetch_image_follows_safe_redirect_to_bsky_cdn():
+    # Set up a 302 within bsky.app → 200.
+    respx.get("https://cdn.bsky.app/img/a.jpg").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://cdn.bsky.app/img/b.jpg"}
+        )
+    )
+    respx.get("https://cdn.bsky.app/img/b.jpg").mock(
+        return_value=httpx.Response(
+            200, content=b"\xff\xd8\xff\xe0", headers={"Content-Type": "image/jpeg"}
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps(
+                {"url": "https://cdn.bsky.app/img/a.jpg"}
+            ).encode("utf-8"),
+        )
+    assert status == 200
+    assert headers["Content-Type"] == "image/jpeg"
+    assert body == b"\xff\xd8\xff\xe0"
+
+
+@respx.mock
+def test_fetch_image_rejects_redirect_to_non_bsky_host():
+    respx.get("https://cdn.bsky.app/img/a.jpg").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://evil.example/x.jpg"}
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch-image",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps(
+                {"url": "https://cdn.bsky.app/img/a.jpg"}
+            ).encode("utf-8"),
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_log_request_escapes_control_chars(capsys):
+    """_log_request must escape terminal control bytes via
+    encode('ascii', 'backslashreplace') so a request with ESC bytes in the
+    path can't reposition the operator's terminal cursor."""
+    from bsky_saves.serve import make_handler
+
+    HandlerCls = make_handler(port=1, allow_origins=[], verbose=True)
+
+    # _log_request only reads self.command and self.path, so a minimal stub
+    # works. Calling the unbound method directly avoids the BaseHTTPRequestHandler
+    # initialization dance (sockets, request parsing, etc.).
+    class _Stub:
+        command = "GET"
+        path = "/ping\x1b[2J"
+
+    HandlerCls._log_request(_Stub())
+
+    captured = capsys.readouterr()
+    # The escape byte should appear as its escape sequence in stderr,
+    # not as the raw control byte.
+    assert "\\x1b" in captured.err
+    assert "\x1b" not in captured.err
+
+
+def test_extract_article_rejects_loopback_url_returns_400():
+    """The HTTP endpoint returns 400 {"error":"url not allowed"} for SSRF-blocked
+    URLs. The articles._extract_article helper returns
+    "fetch_error:UnsafeURLError:..." and the handler maps it to 400, distinct
+    from the generic 502 used for other fetch_error: variants."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps({"url": "http://127.0.0.1/secret"}).encode("utf-8"),
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_extract_article_rejects_metadata_ip_returns_400():
+    """AWS-style metadata IP gets the same 400 url-not-allowed treatment."""
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/extract-article",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=json.dumps(
+                {"url": "http://169.254.169.254/latest/meta-data/"}
+            ).encode("utf-8"),
+        )
+    assert status == 400
+    assert json.loads(body) == {"error": "url not allowed"}
+
+
+def test_host_missing_returns_421():
+    """Empty/missing Host header is rejected by the security gate.
+
+    Python's http.client always sends a Host header, so we use raw socket
+    I/O to construct an HTTP/1.0 request without one.
+    """
+    import socket
+    with serve_in_background() as (port, _):
+        sock = socket.create_connection(("127.0.0.1", port))
+        try:
+            sock.sendall(b"GET /ping HTTP/1.0\r\n\r\n")
+            chunks = []
+            while True:
+                buf = sock.recv(4096)
+                if not buf:
+                    break
+                chunks.append(buf)
+            response = b"".join(chunks)
+        finally:
+            sock.close()
+    first_line = response.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+    assert " 421 " in first_line, f"Got: {first_line!r}"

@@ -25,6 +25,7 @@ import httpx
 from . import __version__
 from .articles import _extract_article
 from .auth import create_session, refresh_session
+from ._net import UnsafeURLError, assert_public_http_url, safe_http_get
 from .fetch import (
     ENDPOINT_IDS,
     fetch_one_page,
@@ -40,6 +41,10 @@ from .threads import (
     THREAD_SCHEMA_VERSION,
 )
 from .tid import rkey_of, decode_tid_to_iso
+
+
+_MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB uniform cap on every POST body.
+_BODY_REJECTED: object = object()    # Sentinel for "413 already sent."
 
 
 def _handle_ping(handler) -> None:
@@ -67,6 +72,8 @@ def _is_allowed_image_url(url: str) -> bool:
 
 def _handle_fetch_image(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     url = (body or {}).get("url")
     if not isinstance(url, str) or not url:
         handler._send_json_error(400, "missing url")
@@ -74,13 +81,23 @@ def _handle_fetch_image(handler) -> None:
     if not _is_allowed_image_url(url):
         handler._send_json_error(400, "url not allowed")
         return
+
+    def enforce_bsky_cdn(u: str) -> None:
+        if not _is_allowed_image_url(u):
+            raise UnsafeURLError("not a bsky.app CDN URL")
+
     try:
-        r = httpx.get(
+        r = safe_http_get(
             url,
+            allow_http=False,
+            max_redirects=3,
+            hop_check=enforce_bsky_cdn,
             headers={"User-Agent": _IMAGE_USER_AGENT, "Accept": "image/*"},
-            follow_redirects=True,
             timeout=_IMAGE_TIMEOUT,
         )
+    except UnsafeURLError:
+        handler._send_json_error(400, "url not allowed")
+        return
     except Exception as e:
         handler._send_json_error(502, f"{type(e).__name__}: {str(e)[:200]}")
         return
@@ -93,6 +110,8 @@ def _handle_fetch_image(handler) -> None:
 
 def _handle_extract_article(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     url = (body or {}).get("url")
     if not isinstance(url, str) or not url:
         handler._send_json_error(400, "missing url")
@@ -110,6 +129,9 @@ def _handle_extract_article(handler) -> None:
             except ValueError:
                 code = 502
             handler._send_json_error(code, f"upstream {code}")
+            return
+        if error.startswith("fetch_error:UnsafeURLError:"):
+            handler._send_json_error(400, "url not allowed")
             return
         if error.startswith("fetch_error:"):
             handler._send_json_error(502, error)
@@ -132,6 +154,8 @@ def _handle_extract_article(handler) -> None:
 
 def _handle_fetch(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     creds = _validate_creds((body or {}).get("credentials"))
     if creds is None:
         handler._send_json_error(400, "missing credentials")
@@ -277,6 +301,8 @@ def _handle_fetch(handler) -> None:
 
 def _handle_enrich(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     uris = (body or {}).get("uris")
     if not isinstance(uris, list):
         handler._send_json_error(400, "missing uris")
@@ -310,6 +336,8 @@ def _now_iso() -> str:
 
 def _handle_hydrate_threads(handler) -> None:
     body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
     creds = _validate_creds((body or {}).get("credentials"))
     if creds is None:
         handler._send_json_error(400, "missing credentials")
@@ -423,6 +451,13 @@ def _validate_creds(creds: object) -> dict | None:
     if not isinstance(pds, str) or not pds:
         pds = DEFAULT_PDS
 
+    # SSRF guard: pds must be a safe HTTPS URL (no plain HTTP, no
+    # private/loopback/link-local/metadata IPs).
+    try:
+        assert_public_http_url(pds, allow_http=False)
+    except UnsafeURLError:
+        return None
+
     # App-password path takes priority when app_password is present.
     if creds.get("app_password") is not None:
         handle = creds.get("handle")
@@ -502,12 +537,13 @@ def _decode_cursor(wrapped: str) -> dict | None:
 
 def make_handler(
     *,
+    port: int,
     allow_origins: list[str],
     verbose: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
-    """Build a BaseHTTPRequestHandler subclass that closes over allow_origins
-    and verbose. Returning a class (not an instance) is what BaseHTTPRequestHandler
-    expects from ThreadingHTTPServer."""
+    """Build a BaseHTTPRequestHandler subclass that closes over port,
+    allow_origins and verbose. Returning a class (not an instance) is what
+    BaseHTTPRequestHandler expects from ThreadingHTTPServer."""
 
     origins = list(allow_origins)
 
@@ -519,8 +555,9 @@ def make_handler(
 
         def _log_request(self) -> None:
             if verbose:
+                safe_path = self.path.encode("unicode_escape").decode("ascii")
                 print(
-                    f"bsky-saves: {self.command} {self.path}",
+                    f"bsky-saves: {self.command} {safe_path}",
                     file=sys.stderr,
                 )
 
@@ -532,12 +569,18 @@ def make_handler(
             self.send_header("Access-Control-Allow-Headers", "Content-Type")
             self.send_header("Access-Control-Max-Age", "600")
 
+        def _security_headers(self) -> None:
+            """Headers applied to every response. Tightly bounded defense-in-depth."""
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Cache-Control", "no-store")
+
         def _send_json(self, code: int, payload: dict) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self._cors_headers()
+            self._security_headers()
             self.end_headers()
             self.wfile.write(body)
 
@@ -557,14 +600,26 @@ def make_handler(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self._cors_headers()
+            self._security_headers()
             self.end_headers()
             self.wfile.write(body)
 
-        def _read_json_body(self) -> dict | None:
+        def _read_json_body(self) -> dict | None | object:
+            """Read and parse the JSON request body.
+
+            Returns:
+                - dict: successfully parsed body.
+                - None: body missing, empty, malformed, or not a dict; caller sends 400.
+                - _BODY_REJECTED: Content-Length exceeded 10 MB; this method already
+                  sent 413. Caller must return without sending another response.
+            """
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except (TypeError, ValueError):
                 return None
+            if length > _MAX_BODY_BYTES:
+                self._send_json_error(413, "request too large")
+                return _BODY_REJECTED
             if length <= 0:
                 return None
             try:
@@ -574,18 +629,57 @@ def make_handler(
                 return None
             return parsed if isinstance(parsed, dict) else None
 
+        def _security_gate(self, method: str) -> bool:
+            """Validate Host and Origin. Returns True if the request may
+            proceed to _dispatch; returns False after sending a rejection
+            response. Called from every do_* entrypoint before route handling.
+            """
+            if not self._check_host():
+                return False
+            if not self._check_origin():
+                return False
+            return True
+
+        def _check_host(self) -> bool:
+            """Reject DNS-rebinding: Host must equal 127.0.0.1:<port> or
+            localhost:<port>. Anything else returns 421 Misdirected Request."""
+            host = self.headers.get("Host", "")
+            expected = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            if host not in expected:
+                self._send_json_error(421, "misdirected request")
+                return False
+            return True
+
+        def _check_origin(self) -> bool:
+            """Reject disallowed-origin requests with 403. Missing Origin is
+            allowed (curl-style is permitted per spec §4.4)."""
+            origin = self.headers.get("Origin", "")
+            if not origin:
+                return True
+            if origin not in origins:
+                self._send_json_error(403, "Origin not allowed")
+                return False
+            return True
+
         def do_OPTIONS(self) -> None:
             self._log_request()
+            if not self._security_gate("OPTIONS"):
+                return
             self.send_response(204)
             self._cors_headers()
+            self._security_headers()
             self.end_headers()
 
         def do_GET(self) -> None:
             self._log_request()
+            if not self._security_gate("GET"):
+                return
             self._dispatch("GET")
 
         def do_POST(self) -> None:
             self._log_request()
+            if not self._security_gate("POST"):
+                return
             self._dispatch("POST")
 
         def __getattr__(self, name: str):
@@ -598,6 +692,8 @@ def make_handler(
 
                 def _unknown_verb():
                     self._log_request()
+                    if not self._security_gate(method):
+                        return
                     self._dispatch(method)
 
                 return _unknown_verb
@@ -613,6 +709,15 @@ def make_handler(
     return Handler
 
 
+def _default_origins(port: int) -> list[str]:
+    """Default origin allowlist, computed from the bound port. Spec §4.4."""
+    return [
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+        "https://saves.lightseed.net",
+    ]
+
+
 def run_serve(
     *,
     port: int = 47826,
@@ -620,8 +725,8 @@ def run_serve(
     verbose: bool = False,
 ) -> int:
     """Start the daemon. Blocks until Ctrl-C. Returns an exit code."""
-    origins = list(allow_origins or ["https://saves.lightseed.net"])
-    handler_cls = make_handler(allow_origins=origins, verbose=verbose)
+    origins = _default_origins(port) + list(allow_origins or [])
+    handler_cls = make_handler(port=port, allow_origins=origins, verbose=verbose)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)
     except OSError as e:

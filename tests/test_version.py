@@ -12,3 +12,15 @@ def test_version_matches_package_metadata():
     where pyproject.toml gets bumped but __init__.py is forgotten.
     """
     assert bsky_saves.__version__ == version("bsky-saves")
+
+
+def test_image_user_agent_contains_version():
+    from bsky_saves import __version__
+    from bsky_saves.images import DEFAULT_USER_AGENT
+    assert __version__ in DEFAULT_USER_AGENT
+
+
+def test_article_user_agent_contains_version():
+    from bsky_saves import __version__
+    from bsky_saves.articles import DEFAULT_USER_AGENT
+    assert __version__ in DEFAULT_USER_AGENT

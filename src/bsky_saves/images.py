@@ -13,13 +13,16 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 import httpx
+
+from . import __version__
+from ._io import atomic_write_inventory
+from ._net import safe_http_get
 
 
 def _iter_image_urls(entry: dict) -> Iterator[str]:
@@ -58,9 +61,7 @@ def _iter_image_urls(entry: dict) -> Iterator[str]:
                 yield url
 
 
-DEFAULT_USER_AGENT = (
-    "bsky-saves/0.2 (+https://github.com/tenorune/bsky-saves)"
-)
+DEFAULT_USER_AGENT = f"bsky-saves/{__version__} (+https://github.com/tenorune/bsky-saves)"
 TIMEOUT = 30.0
 
 
@@ -72,10 +73,11 @@ def filename_for_url(url: str) -> str:
 
 def download_to(url: str, dest: Path, *, user_agent: str = DEFAULT_USER_AGENT) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    r = httpx.get(
+    r = safe_http_get(
         url,
+        allow_http=False,
+        max_redirects=3,
         headers={"User-Agent": user_agent, "Accept": "image/*"},
-        follow_redirects=True,
         timeout=TIMEOUT,
     )
     r.raise_for_status()
@@ -156,12 +158,7 @@ def hydrate_images(
 
     if changed:
         inv["fetched_at"] = _now_iso()
-        tmp_path = inventory_path.with_suffix(inventory_path.suffix + ".tmp")
-        tmp_path.write_text(
-            json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
-        os.rename(tmp_path, inventory_path)
+        atomic_write_inventory(inventory_path, inv)
 
     print(
         f"bsky-saves: processed {entries_processed} entries, "

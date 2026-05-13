@@ -20,11 +20,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+# trafilatura uses lxml.html.HTMLParser by default, which is XXE-safe
+# (does not resolve external entities). pyproject.toml pins a minimum
+# version known to ship that default.
 import trafilatura
 
-DEFAULT_USER_AGENT = (
-    "bsky-saves/0.1 (+https://github.com/tenorune/bsky-saves)"
-)
+from . import __version__
+from ._io import atomic_write_inventory
+from ._net import UnsafeURLError, safe_http_get
+
+DEFAULT_USER_AGENT = f"bsky-saves/{__version__} (+https://github.com/tenorune/bsky-saves)"
 RATE_LIMIT_SEC = 1.0
 TIMEOUT = 30.0
 MIN_EXTRACT_CHARS = 100
@@ -65,12 +70,15 @@ def _extract_article(
       - "extraction_failed" — trafilatura returned None.
     """
     try:
-        r = httpx.get(
+        r = safe_http_get(
             url,
+            allow_http=True,
+            max_redirects=5,
             headers={"User-Agent": user_agent, "Accept": "text/html,*/*;q=0.8"},
-            follow_redirects=True,
             timeout=TIMEOUT,
         )
+    except UnsafeURLError as e:
+        return None, f"fetch_error:UnsafeURLError:{str(e)[:120]}"
     except Exception as e:
         return None, f"fetch_error:{type(e).__name__}:{str(e)[:120]}"
 
@@ -191,10 +199,7 @@ def hydrate_articles(
         time.sleep(RATE_LIMIT_SEC)
 
     inv["fetched_at"] = _now_iso()
-    inventory_path.write_text(
-        json.dumps(inv, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_inventory(inventory_path, inv)
 
     print(
         f"bsky-saves: hydrated {success}, failed {failed}",

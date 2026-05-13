@@ -22,6 +22,7 @@ from typing import Callable
 
 import httpx
 
+from ._io import atomic_write_inventory
 from .auth import ServiceAuthError, create_session, get_service_auth
 from .normalize import merge_into_inventory, normalise_record
 
@@ -342,10 +343,7 @@ def fetch_to_inventory(
     if first_run or merged["saves"] != existing["saves"]:
         merged["fetched_at"] = _now_iso()
         inventory_path.parent.mkdir(parents=True, exist_ok=True)
-        inventory_path.write_text(
-            json.dumps(merged, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        atomic_write_inventory(inventory_path, merged)
     print(
         f"bsky-saves: inventory now has {len(merged['saves'])} total entries",
         file=sys.stderr,
