@@ -26,6 +26,7 @@ from pathlib import Path
 
 import httpx
 
+from . import __version__
 from ._io import atomic_write_inventory
 from .normalize import extract_media
 
@@ -43,9 +44,7 @@ from .normalize import extract_media
 THREAD_SCHEMA_VERSION = 4
 
 DEFAULT_APPVIEW = "https://public.api.bsky.app"
-DEFAULT_USER_AGENT = (
-    "bsky-saves/0.1 (+https://github.com/tenorune/bsky-saves)"
-)
+DEFAULT_USER_AGENT = f"bsky-saves/{__version__} (+https://github.com/tenorune/bsky-saves)"
 RATE_LIMIT_SEC = 0.5
 TIMEOUT = 30.0
 

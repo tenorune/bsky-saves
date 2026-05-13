@@ -24,3 +24,9 @@ def test_article_user_agent_contains_version():
     from bsky_saves import __version__
     from bsky_saves.articles import DEFAULT_USER_AGENT
     assert __version__ in DEFAULT_USER_AGENT
+
+
+def test_threads_user_agent_contains_version():
+    from bsky_saves import __version__
+    from bsky_saves.threads import DEFAULT_USER_AGENT
+    assert __version__ in DEFAULT_USER_AGENT
