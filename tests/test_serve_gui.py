@@ -286,3 +286,26 @@ def test_serve_static_or_spa_assets_send_nosniff(tmp_path):
     h = _StubHandler()
     serve_static_or_spa(h, "/assets/main-abc123.js", gui)
     assert h.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_serve_static_or_spa_rejects_root_dotfile(tmp_path):
+    """A GET /.gui-version must 404 even though the marker file exists on disk."""
+    gui = _populate_gui_root(tmp_path)
+    (gui / ".gui-version").write_text("0.5.3\nabc123\n", encoding="utf-8")
+    h = _StubHandler()
+    result = serve_static_or_spa(h, "/.gui-version", gui)
+    assert result is True
+    assert h.status == 404
+    # The marker file content must not appear in the response body.
+    assert b"0.5.3" not in h.body
+
+
+def test_serve_static_or_spa_rejects_nested_dotfile(tmp_path):
+    """A path containing any dotfile component is rejected."""
+    gui = _populate_gui_root(tmp_path)
+    (gui / "assets" / ".secret").write_bytes(b"SECRET")
+    h = _StubHandler()
+    result = serve_static_or_spa(h, "/assets/.secret", gui)
+    assert result is True
+    assert h.status == 404
+    assert b"SECRET" not in h.body

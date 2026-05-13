@@ -112,7 +112,14 @@ def _extract_tarball(data: bytes, dest: Path) -> None:
     dest.mkdir(parents=True)
 
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        members = [m for m in tar.getmembers() if Path(m.name).name != "CNAME"]
+        # Skip CNAME (GitHub Pages artefact) and any dotfile (e.g. .gitkeep)
+        # per spec §4.2 step 9. The .gui-version marker we write ourselves
+        # lives outside the tarball.
+        members = [
+            m for m in tar.getmembers()
+            if Path(m.name).name != "CNAME"
+            and not Path(m.name).name.startswith(".")
+        ]
 
         # Decide whether to strip a leading 'dist/' prefix.
         strip_prefix = ""

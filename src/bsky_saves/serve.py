@@ -548,7 +548,7 @@ def make_handler(
     BaseHTTPRequestHandler expects from ThreadingHTTPServer."""
 
     origins = list(allow_origins)
-    gui = gui_root  # closure-captured for use in _dispatch (Task 10)
+    gui = gui_root  # closure-captured for use in _dispatch
 
     class Handler(BaseHTTPRequestHandler):
         # Suppress the default "127.0.0.1 - - [...] GET /ping" log line; we
