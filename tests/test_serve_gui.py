@@ -148,11 +148,39 @@ def test_serve_static_or_spa_rejects_path_traversal(tmp_path):
     assert b"SECRET" not in h.body
 
 
-def test_serve_static_or_spa_404_for_missing_file(tmp_path):
-    """A path that doesn't exist returns 404. Task 7 changes this for
-    non-API-prefix paths to serve index.html (SPA fallback) instead."""
+def test_serve_static_or_spa_returns_false_for_api_path(tmp_path):
+    """A path matching a documented API route defers (False) when no static
+    file with that name exists. Caller sends JSON 404 via existing path."""
     gui = _populate_gui_root(tmp_path)
     h = _StubHandler()
-    result = serve_static_or_spa(h, "/missing.txt", gui)
+    result = serve_static_or_spa(h, "/fetch", gui)
+    assert result is False
+    assert h.status is None  # no response sent
+
+
+def test_serve_static_or_spa_spa_fallback_for_non_existent_route(tmp_path):
+    """A path that doesn't exist and isn't an API prefix gets index.html (SPA)."""
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    result = serve_static_or_spa(h, "/some/spa/route", gui)
     assert result is True
-    assert h.status == 404
+    assert h.status == 200
+    assert h.body == b"<html>root</html>"
+
+
+def test_serve_static_or_spa_defers_all_documented_api_paths(tmp_path):
+    """Each documented API path should defer (return False) when no static
+    file with that exact name exists."""
+    gui = _populate_gui_root(tmp_path)
+    for api_path in [
+        "/ping",
+        "/fetch-image",
+        "/extract-article",
+        "/fetch",
+        "/enrich",
+        "/hydrate-threads",
+    ]:
+        h = _StubHandler()
+        result = serve_static_or_spa(h, api_path, gui)
+        assert result is False, f"expected deferral for {api_path}"
+        assert h.status is None, f"expected no response for {api_path}"

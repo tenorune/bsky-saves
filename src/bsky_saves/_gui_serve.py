@@ -37,6 +37,19 @@ def resolve_gui_root() -> Path:
     return root
 
 
+# Documented API paths from serve.py's ROUTES table. Listed here for SPA
+# fallback decisions: if a GET request matches one of these and isn't a real
+# file in _gui/, defer to the caller's 404 path rather than serving index.html.
+# This list MUST be kept in sync with serve.py's ROUTES.
+_API_PATHS = frozenset({
+    "/ping",
+    "/fetch-image",
+    "/extract-article",
+    "/fetch",
+    "/enrich",
+    "/hydrate-threads",
+})
+
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".htm": "text/html; charset=utf-8",
@@ -98,8 +111,14 @@ def serve_static_or_spa(handler, request_path: str, gui_root: Path) -> bool:
         _send_file(handler, candidate)
         return True
 
-    # File doesn't exist. Task 7 extends this with SPA fallback + API prefix.
-    _send_404(handler)
+    # File doesn't exist. Two cases:
+    # 1. Documented API path: defer (False) — caller sends JSON 404.
+    # 2. SPA route: serve index.html (200) so the GUI's router takes over.
+    if decoded in _API_PATHS:
+        return False
+
+    index = gui_root / "index.html"
+    _send_file(handler, index)
     return True
 
 
