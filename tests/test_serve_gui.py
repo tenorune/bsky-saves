@@ -269,3 +269,20 @@ def test_serve_static_or_spa_head_sends_headers_no_body(tmp_path):
     assert h.headers["Content-Type"] == "application/javascript"
     assert h.headers["Content-Length"] == str(len(b"console.log(1);"))
     assert h.body == b""  # HEAD writes no body
+
+
+def test_serve_static_or_spa_sends_nosniff(tmp_path):
+    """X-Content-Type-Options: nosniff applies uniformly to API AND static
+    responses (spec §5.6)."""
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/", gui)
+    assert h.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_serve_static_or_spa_assets_send_nosniff(tmp_path):
+    """nosniff also applies to /assets/* responses."""
+    gui = _populate_gui_root(tmp_path)
+    h = _StubHandler()
+    serve_static_or_spa(h, "/assets/main-abc123.js", gui)
+    assert h.headers["X-Content-Type-Options"] == "nosniff"

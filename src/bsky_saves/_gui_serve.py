@@ -162,6 +162,7 @@ def _send_file(
     handler.send_response(200)
     handler.send_header("Content-Type", content_type_for(path))
     handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("X-Content-Type-Options", "nosniff")
     handler.send_header("Cache-Control", _cache_control_for(rel_path, is_spa_fallback=is_spa_fallback))
     handler.send_header("Content-Security-Policy", _CSP)
     handler.send_header("X-Frame-Options", "DENY")
@@ -176,6 +177,7 @@ def _send_404(handler) -> None:
     handler.send_response(404)
     handler.send_header("Content-Type", "text/plain; charset=utf-8")
     handler.send_header("Content-Length", "9")
+    handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
     if getattr(handler, "command", "GET") != "HEAD":
         handler.wfile.write(b"not found")
