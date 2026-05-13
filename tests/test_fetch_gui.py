@@ -313,3 +313,27 @@ def test_fetch_gui_refetches_when_sha_bumped(tmp_path, gui_tarball_fixture):
         fetch_gui(tmp_path)
 
     assert (gui_dir / "index.html").read_bytes() == b"<html>new</html>"
+
+
+def test_fetch_gui_skips_dotfiles(tmp_path):
+    """Spec §4.2 step 9: dotfiles at the tarball root are skipped."""
+    tarball, sha = _make_tarball_with_paths([
+        ("index.html", b"<html>x</html>"),
+        (".gitkeep", b""),
+        (".env", b"SECRET=value"),
+    ])
+    _write_pyproject(tmp_path, "0.5.3")
+    _write_sha256(tmp_path, sha)
+
+    mock_response = MagicMock()
+    mock_response.read.return_value = tarball
+    mock_response.url = "https://release-assets.githubusercontent.com/x"
+    mock_response.__enter__.return_value = mock_response
+
+    with patch("scripts.fetch_gui.urllib.request.urlopen", return_value=mock_response):
+        fetch_gui(tmp_path)
+
+    out = tmp_path / "src" / "bsky_saves" / "_gui"
+    assert (out / "index.html").exists()
+    assert not (out / ".gitkeep").exists()
+    assert not (out / ".env").exists()

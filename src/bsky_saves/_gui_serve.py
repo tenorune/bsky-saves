@@ -124,6 +124,14 @@ def serve_static_or_spa(handler, request_path: str, gui_root: Path) -> bool:
     parsed_path = urlsplit(request_path).path
     decoded = unquote(parsed_path)
 
+    # Reject dotfile paths (e.g. /.gui-version, /assets/.hidden). The vendoring
+    # script skips dotfiles in the tarball itself, but the marker file we write
+    # post-extraction is a dotfile that physically exists in _gui/ — refuse to
+    # serve it regardless.
+    if any(part.startswith(".") for part in decoded.split("/") if part):
+        _send_404(handler)
+        return True
+
     # Resolve candidate path. Root → index.html.
     rel = decoded.lstrip("/")
     if rel == "":
