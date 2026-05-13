@@ -654,6 +654,15 @@ def make_handler(
     return Handler
 
 
+def _default_origins(port: int) -> list[str]:
+    """Default origin allowlist, computed from the bound port. Spec §4.4."""
+    return [
+        f"http://127.0.0.1:{port}",
+        f"http://localhost:{port}",
+        "https://saves.lightseed.net",
+    ]
+
+
 def run_serve(
     *,
     port: int = 47826,
@@ -661,7 +670,7 @@ def run_serve(
     verbose: bool = False,
 ) -> int:
     """Start the daemon. Blocks until Ctrl-C. Returns an exit code."""
-    origins = list(allow_origins or ["https://saves.lightseed.net"])
+    origins = _default_origins(port) + list(allow_origins or [])
     handler_cls = make_handler(port=port, allow_origins=origins, verbose=verbose)
     try:
         server = ThreadingHTTPServer(("127.0.0.1", port), handler_cls)

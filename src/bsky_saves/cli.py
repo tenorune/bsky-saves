@@ -125,9 +125,11 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         default=None,
         metavar="ORIGIN",
-        help="Origin permitted to call this daemon. Repeatable. "
-             "Explicit values fully replace the default of "
-             "https://saves.lightseed.net.",
+        help=(
+            "Additional Origin to permit, in addition to the defaults "
+            "(http://127.0.0.1:<port>, http://localhost:<port>, "
+            "https://saves.lightseed.net). May be specified multiple times."
+        ),
     )
     p_serve.add_argument(
         "--verbose",
@@ -193,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_serve(
             port=args.port,
-            allow_origins=args.allow_origin or ["https://saves.lightseed.net"],
+            allow_origins=args.allow_origin or [],
             verbose=args.verbose,
         )
 

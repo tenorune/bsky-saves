@@ -24,14 +24,20 @@ DEFAULT_ORIGIN = "https://saves.lightseed.net"
 
 
 @contextlib.contextmanager
-def serve_in_background(allow_origins=(DEFAULT_ORIGIN,), verbose=False):
-    """Boot the daemon in a daemon thread on an ephemeral port; yield (port, server)."""
+def serve_in_background(allow_origins=(), verbose=False):
+    """Boot the daemon in a daemon thread on an ephemeral port; yield (port, server).
+
+    allow_origins is the list of *additional* origins (equivalent to repeated
+    --allow-origin flags). The default allowlist (_default_origins) is always
+    prepended, matching run_serve behaviour after spec §4.4 additive change.
+    """
     # Bind port=0 first so the OS assigns an ephemeral port, then build the
     # handler with the actual port so Host-header validation works correctly.
     server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
     port = server.server_address[1]
+    full_origins = serve._default_origins(port) + list(allow_origins)
     handler_cls = serve.make_handler(
-        port=port, allow_origins=list(allow_origins), verbose=verbose
+        port=port, allow_origins=full_origins, verbose=verbose
     )
     server.RequestHandlerClass = handler_cls
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -360,21 +366,47 @@ def test_extract_article_network_error_returns_502():
     assert "error" in json.loads(body)
 
 
-def test_allow_origin_override_replaces_default():
-    """Custom allow_origins fully replaces the default list."""
-    custom = "https://other.example"
+def test_allow_origin_additive_keeps_defaults():
+    """Custom --allow-origin entries are added to (not replace) the default
+    allowlist. The default origin (https://saves.lightseed.net) must still
+    be allowed after passing --allow-origin."""
+    custom = "https://custom.example"
     with serve_in_background(allow_origins=(custom,)) as (port, _):
-        # Default origin must NOT be allowed.
-        _, headers_default, _ = _request(
+        # Default origin still allowed.
+        status_default, h_default, _ = _request(
             port, "/ping", headers={"Origin": DEFAULT_ORIGIN}
         )
-        assert "Access-Control-Allow-Origin" not in headers_default
-
-        # Custom origin must be allowed.
-        _, headers_custom, _ = _request(
+        # Custom origin allowed.
+        status_custom, h_custom, _ = _request(
             port, "/ping", headers={"Origin": custom}
         )
-        assert headers_custom["Access-Control-Allow-Origin"] == custom
+        # Unlisted origin still rejected.
+        status_other, _, _ = _request(
+            port, "/ping", headers={"Origin": "https://unlisted.example"}
+        )
+    assert status_default == 200
+    assert h_default["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+    assert status_custom == 200
+    assert h_custom["Access-Control-Allow-Origin"] == custom
+    assert status_other == 403
+
+
+def test_default_allowlist_includes_loopback_origins():
+    """The default allowlist now includes http://127.0.0.1:<port> and
+    http://localhost:<port> in addition to https://saves.lightseed.net."""
+    with serve_in_background() as (port, _):
+        loopback_v4 = f"http://127.0.0.1:{port}"
+        loopback_dns = f"http://localhost:{port}"
+        status_v4, h_v4, _ = _request(
+            port, "/ping", headers={"Origin": loopback_v4}
+        )
+        status_dns, h_dns, _ = _request(
+            port, "/ping", headers={"Origin": loopback_dns}
+        )
+    assert status_v4 == 200
+    assert h_v4["Access-Control-Allow-Origin"] == loopback_v4
+    assert status_dns == 200
+    assert h_dns["Access-Control-Allow-Origin"] == loopback_dns
 
 
 def test_multiple_allow_origins_all_allowed():
