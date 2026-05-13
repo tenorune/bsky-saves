@@ -25,6 +25,7 @@ import httpx
 from . import __version__
 from .articles import _extract_article
 from .auth import create_session, refresh_session
+from ._net import UnsafeURLError, assert_public_http_url
 from .fetch import (
     ENDPOINT_IDS,
     fetch_one_page,
@@ -436,6 +437,13 @@ def _validate_creds(creds: object) -> dict | None:
     pds = creds.get("pds")
     if not isinstance(pds, str) or not pds:
         pds = DEFAULT_PDS
+
+    # SSRF guard: pds must be a safe HTTPS URL (no plain HTTP, no
+    # private/loopback/link-local/metadata IPs).
+    try:
+        assert_public_http_url(pds, allow_http=False)
+    except UnsafeURLError:
+        return None
 
     # App-password path takes priority when app_password is present.
     if creds.get("app_password") is not None:

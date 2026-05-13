@@ -1951,3 +1951,71 @@ def test_options_preflight_includes_security_headers():
         )
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Cache-Control"] == "no-store"
+
+
+def test_fetch_rejects_pds_pointing_at_loopback():
+    body = {
+        "credentials": {
+            "handle": "user.bsky.social",
+            "app_password": "xxxx-xxxx-xxxx-xxxx",
+            "pds": "http://127.0.0.1:8080",
+        }
+    }
+    with serve_in_background() as (port, _):
+        status, _, body_resp = _request(
+            port,
+            "/fetch",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=body,
+        )
+    assert status == 400
+    assert json.loads(body_resp) == {"error": "missing credentials"}
+
+
+def test_fetch_rejects_pds_pointing_at_metadata_ip():
+    body = {
+        "credentials": {
+            "handle": "user.bsky.social",
+            "app_password": "xxxx-xxxx-xxxx-xxxx",
+            "pds": "https://169.254.169.254",
+        }
+    }
+    with serve_in_background() as (port, _):
+        status, _, body_resp = _request(
+            port,
+            "/fetch",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=body,
+        )
+    assert status == 400
+
+
+def test_hydrate_threads_rejects_pds_pointing_at_private_ip():
+    body = {
+        "uris": ["at://example/post/1"],
+        "credentials": {
+            "handle": "user.bsky.social",
+            "app_password": "xxxx-xxxx-xxxx-xxxx",
+            "pds": "https://10.0.0.1",
+        },
+    }
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port,
+            "/hydrate-threads",
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            },
+            body=body,
+        )
+    assert status == 400
