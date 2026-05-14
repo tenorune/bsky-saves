@@ -303,6 +303,10 @@ def fetch_to_inventory(
 ) -> int:
     """High-level: authenticate, probe, normalise, merge into inventory file.
     Returns the number of saves in the resulting inventory.
+
+    ``mode`` ("sync" | "keep-lost" | "keep-all", default "keep-lost") is
+    forwarded to ``merge_into_inventory`` to select the retention policy;
+    see the v0.6.0 spec section 6.2.
     """
     print(f"bsky-saves: authenticating as {handle}", file=sys.stderr)
     session = create_session(pds_base, handle, app_password)
