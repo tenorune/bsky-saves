@@ -654,7 +654,6 @@ def test_refresh_session_raises_on_4xx():
 
 # --- CLI argument parsing for `fetch` retention modes ---
 
-import pytest
 from bsky_saves.cli import _build_parser
 
 

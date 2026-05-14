@@ -92,6 +92,10 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="mode",
         help="Alias for --mode keep-all.",
     )
+    # NOTE: argparse MEG enforcement is bypassed when one arg specifies the
+    # default value explicitly (e.g. --sync --mode keep-lost). This is a
+    # known argparse limitation with store_const + set_defaults on a shared
+    # dest; the last-given value wins silently in that narrow case.
     p_fetch.set_defaults(mode="keep-lost")
 
     p_hydrate = sub.add_parser("hydrate", help="Hydrate inventory entries.")
