@@ -650,3 +650,40 @@ def test_refresh_session_raises_on_4xx():
     )
     with pytest.raises(httpx.HTTPStatusError):
         refresh_session(PDS_BASE, "expired-refresh")
+
+
+# --- CLI argument parsing for `fetch` retention modes ---
+
+import pytest
+from bsky_saves.cli import _build_parser
+
+
+def test_cli_fetch_mode_defaults_to_keep_lost():
+    args = _build_parser().parse_args(["fetch", "--inventory", "inv.json"])
+    assert args.mode == "keep-lost"
+
+
+def test_cli_fetch_mode_explicit():
+    args = _build_parser().parse_args(
+        ["fetch", "--inventory", "inv.json", "--mode", "sync"]
+    )
+    assert args.mode == "sync"
+
+
+def test_cli_fetch_sync_alias():
+    args = _build_parser().parse_args(["fetch", "--inventory", "inv.json", "--sync"])
+    assert args.mode == "sync"
+
+
+def test_cli_fetch_keep_all_alias():
+    args = _build_parser().parse_args(
+        ["fetch", "--inventory", "inv.json", "--keep-all"]
+    )
+    assert args.mode == "keep-all"
+
+
+def test_cli_fetch_mode_aliases_are_mutually_exclusive():
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(
+            ["fetch", "--inventory", "inv.json", "--sync", "--keep-all"]
+        )
