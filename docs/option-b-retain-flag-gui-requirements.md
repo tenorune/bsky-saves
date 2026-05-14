@@ -31,7 +31,7 @@ Four new **optional** per-entry fields on each `saves[i]` entry. Timestamps are 
 |---|---|---|
 | `last_seen_at` | string | Timestamp of the most recent fetch in which this URI was present. Refreshed on **every** fetch the URI appears in. |
 | `removed_detected_at` | string, optional | Set when a URI present in the prior inventory is **absent** from a complete fetch (Class 1). **Cleared** when the URI reappears. Presence ⇔ "the bookmark record is no longer in the user's repo." |
-| `subject_status` | string, optional | One of `"not_found"`, `"blocked"`, `"unknown"`. **Absent ⇔ the subject post is live.** `"not_found"` / `"blocked"` mean the post was deleted / the author blocked the user (Class 2). `"unknown"` means the entry came via the `listRecords` fallback, which carries no subject state. |
+| `subject_status` | string, optional | One of `"not_found"`, `"blocked"`, `"unknown"`. **Absent ⇔ the subject post is live.** `"not_found"` / `"blocked"` mean the post was deleted / the author blocked the user (Class 2). `"unknown"` means the entry has *only ever* been seen via the `listRecords` fallback, which carries no subject state — once any hydrated fetch establishes a real status, `"unknown"` can never overwrite it (see §4 step 3). |
 | `subject_status_detected_at` | string, optional | Set when `subject_status` first becomes non-live (`not_found` / `blocked`). Cleared together with `subject_status` when the subject goes live again. Not set for `"unknown"`. |
 
 These are additive. An inventory that has none of them (written by a pre-0.6.0 tool, or exported earlier by the GUI) is valid input — see §4.5.
@@ -80,10 +80,10 @@ Run this when assembling the inventory from a fetch. Inputs: the **prior invento
    - **Lifecycle-flag pass** (new — must be explicit, not part of the field-fill loop, because it must *update every run* and sometimes *clear*). Let `prior` be the entry as it stood in `priorByUri` (or absent, for a brand-new URI) and `fresh` the newly-fetched entry. Comparisons below are always against `prior`, never against the just-field-filled working entry:
      - `last_seen_at = now`.
      - If `prior` had `removed_detected_at`, **delete** it (reappearance).
-     - **`subject_status` reconciliation**, driven by `fresh`'s `subject_status`:
-       - `fresh` has no `subject_status` (live) → delete `subject_status` **and** `subject_status_detected_at`.
-       - `fresh.subject_status` ∈ {`not_found`, `blocked`} → set `subject_status` to that value; set `subject_status_detected_at = now` **only if** `prior` had no `subject_status` or a different one (a state *transition* — includes the brand-new-URI case); if `prior` already had the same `subject_status`, carry its `subject_status_detected_at` forward unchanged.
-       - `fresh.subject_status == "unknown"` → if `prior` exists, **leave its `subject_status` / `subject_status_detected_at` untouched** (downgrade protection: a `listRecords` fallback must not erase a known status). For a brand-new URI, store `subject_status = "unknown"` with no `subject_status_detected_at`.
+     - **`subject_status` reconciliation.** `fresh.subject_status` has exactly three shapes — **absent** (live), **`"not_found"` / `"blocked"`** (Class 2), or **`"unknown"`** (the `listRecords` fallback path) — and all three are handled:
+       - **`fresh` has no `subject_status`** (live) → delete `subject_status` **and** `subject_status_detected_at` from the working entry.
+       - **`fresh.subject_status` ∈ {`not_found`, `blocked`}** → set `subject_status` to that value; set `subject_status_detected_at = now` **only if** `prior` had no `subject_status` or a *different* one (a state *transition* — this includes the brand-new-URI case where `prior` is absent, and the `"unknown"` → known case); if `prior` already had the *same* `subject_status`, carry its `subject_status_detected_at` forward unchanged.
+       - **`fresh.subject_status == "unknown"`** → **`"unknown"` never overwrites, weakens, or clears an existing status, and never touches `subject_status_detected_at`.** If `prior` exists, leave both `subject_status` and `subject_status_detected_at` *exactly as they were* — even if `prior` had `not_found` / `blocked`, and even if `prior` had no status at all (a content-blind `listRecords` fallback must not erase or downgrade what a hydrated fetch established). Store `subject_status = "unknown"` **only** for a brand-new URI (no `prior`), and even then do not set `subject_status_detected_at`. Note this is *not* an unconditional "set `subject_status = "unknown"`" — that naive reading is wrong; for any existing entry, the `"unknown"` case is a no-op.
 4. **For each prior URI absent from `fetchedUris` (Class 1):**
    - mode `keep-all` → keep the entry; set `removed_detected_at = now` if not already present; leave `last_seen_at` at its prior value; leave `subject_status` as-is.
    - mode `keep-lost` or `sync` → drop the entry.
@@ -123,11 +123,14 @@ Absence-detection is only sound on a **complete** fetch: a URI may be declared a
 - fall back to additive-only behaviour for that run — field-fill the pages it did get, but perform **no** step-4 drops and **no** step-5 prune; or
 - discard the partial run entirely and keep the prior inventory.
 
-Running steps 4–5 on a partial page set would false-positive-flag live bookmarks as un-saved and, under `keep-lost` / `sync`, delete them. (The CLI does not have this hazard — its fetch layer is all-or-nothing — so this guard is GUI-specific.)
+Running steps 4–5 on a partial page set would false-positive-flag live bookmarks as un-saved and, under `keep-lost` / `sync`, delete them. (The CLI does not have this hazard — its fetch layer is all-or-nothing.)
 
-**Helper path:** this guard is already satisfied naturally. The reconcile runs in `library-refresh.ts`'s `onAfterEnrich` callback, which fires only *after* the fetch hydrator has paginated the entire cursor chain to completion; an interrupted or failed helper fetch throws *before* `onAfterEnrich` runs. No new code is needed on the helper path — just don't move the reconcile earlier.
+**Status: both current GUI backends already satisfy this guard naturally** — confirmed by the GUI team's review:
 
-**Pyodide path:** verify separately. It runs the core `bsky_saves` fetch code in-browser, which may have its own partial-progress semantics. Whichever `bsky_saves` entry point the Pyodide driver invokes, it must feed the reconcile only a *complete* fetch — see spec §6.3, which states this property for all fetch entry points including Pyodide.
+- **Helper path** — `fetchHydrator` paginates the full cursor chain and only returns when complete; the reconcile runs in `library-refresh.ts`'s `onAfterEnrich` callback, which fires *after* that. An interrupted helper fetch throws before `onAfterEnrich` runs.
+- **Pyodide path** — `runFetchOnly` returns the complete inventory or throws; there is no partial-progress state.
+
+So no new guard code is needed today. The requirement is documented here as an **invariant** — so a future refactor (moving the reconcile earlier, streaming pages into it, a new fetch backend) does not silently break it.
 
 ### 4.5 Backward compatibility
 

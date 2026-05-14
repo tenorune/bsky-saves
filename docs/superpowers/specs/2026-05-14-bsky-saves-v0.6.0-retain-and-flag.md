@@ -91,7 +91,7 @@ Four new **optional** per-entry fields. All timestamps use the existing inventor
 |---|---|---|
 | `last_seen_at` | string (ISO 8601) | The timestamp of the most recent fetch in which this URI was present. Refreshed on **every** fetch the URI appears in. Present on every entry once a fetch has observed it. |
 | `removed_detected_at` | string (ISO 8601), optional | Set when a URI present in the prior inventory is **absent** from a complete fetch (Class 1 — un-saved). **Cleared** if the URI later reappears in a fetch. Presence ⇔ "the bookmark record is no longer in your repo." |
-| `subject_status` | string, optional | One of `"not_found"`, `"blocked"`, `"unknown"`. **Absent ⇔ the subject post is live.** `"not_found"` / `"blocked"` come from the `getBookmarks` `item` union (Class 2 — externally removed). `"unknown"` means the entry was fetched via the `listRecords` fallback, which carries no subject state. Values intentionally echo the existing `quoted_post.unavailable` vocabulary. |
+| `subject_status` | string, optional | One of `"not_found"`, `"blocked"`, `"unknown"`. **Absent ⇔ the subject post is live.** `"not_found"` / `"blocked"` come from the `getBookmarks` `item` union (Class 2 — externally removed). `"unknown"` means the entry has *only ever* been seen via the `listRecords` fallback, which carries no subject state — `"unknown"` never overwrites a real status a hydrated fetch established (see §6.2). Values intentionally echo the existing `quoted_post.unavailable` vocabulary. |
 | `subject_status_detected_at` | string (ISO 8601), optional | Set when `subject_status` first becomes non-live (`not_found` / `blocked`). **Cleared** together with `subject_status` if the subject goes live again. Not set for `"unknown"` (that is not a "went non-live" event). |
 
 These fields are additive; existing inventory readers that ignore unknown keys are unaffected. An inventory written by an older `bsky-saves` (no flags) is valid input — see §6.4.
@@ -177,10 +177,10 @@ Algorithm:
    - **Lifecycle-flag pass** (explicit, *not* routed through the field-fill loop — the field-fill loop cannot express "update every run" or "clear"). Let `prior` be the entry as it stood in the prior inventory (or `None` for a brand-new URI) and `fresh` the newly-fetched entry. Comparisons below are always against `prior`, never against the just-field-filled working entry:
      - `last_seen_at = now`.
      - Delete `removed_detected_at` if `prior` had it (reappearance).
-     - **`subject_status` reconciliation**, driven by `fresh`'s `subject_status`:
-       - `fresh` has no `subject_status` (live observation from `getBookmarks`) → delete `subject_status` and `subject_status_detected_at`.
-       - `fresh.subject_status` ∈ {`not_found`, `blocked`} → set `subject_status` to that value; set `subject_status_detected_at = now` **only if** `prior` had no `subject_status` or a different one (a state *transition* — this includes the brand-new-URI case, where `prior` is `None`); if `prior` already had the same `subject_status`, carry its `subject_status_detected_at` forward unchanged.
-       - `fresh.subject_status == "unknown"` → if `prior` exists, **leave its `subject_status` / `subject_status_detected_at` untouched** (downgrade protection: a `listRecords` fallback must not erase a known status). For a brand-new URI, store `subject_status = "unknown"` with no `subject_status_detected_at`.
+     - **`subject_status` reconciliation.** `fresh.subject_status` has exactly three shapes — **absent** (live, from `getBookmarks`), **`"not_found"` / `"blocked"`** (Class 2, from `getBookmarks`), or **`"unknown"`** (the `listRecords` fallback) — and all three are handled:
+       - **`fresh` has no `subject_status`** (live) → delete `subject_status` and `subject_status_detected_at`.
+       - **`fresh.subject_status` ∈ {`not_found`, `blocked`}** → set `subject_status` to that value; set `subject_status_detected_at = now` **only if** `prior` had no `subject_status` or a *different* one (a state *transition* — this includes the brand-new-URI case where `prior` is `None`, and the `"unknown"` → known case); if `prior` already had the *same* `subject_status`, carry its `subject_status_detected_at` forward unchanged.
+       - **`fresh.subject_status == "unknown"`** → **`"unknown"` never overwrites, weakens, or clears an existing status, and never touches `subject_status_detected_at`.** If `prior` exists, leave both fields *exactly as they were* — even if `prior` had `not_found` / `blocked`, and even if `prior` had no status at all (a content-blind `listRecords` fallback must not erase or downgrade what a hydrated fetch established). Store `subject_status = "unknown"` **only** for a brand-new URI (`prior is None`), and even then do not set `subject_status_detected_at`. This is *not* an unconditional "set `subject_status = "unknown"`" — for any existing entry it is a no-op.
 4. **For each existing URI absent from `fetched_uris` (Class 1):**
    - `mode == "keep-all"` → keep the entry; set `removed_detected_at = now` if not already set; leave `last_seen_at` at its prior value; leave `subject_status` as-is (it may carry a stale Class 2 status — "Class 1 masks Class 2").
    - `mode in ("keep-lost", "sync")` → drop the entry.
@@ -192,8 +192,10 @@ Algorithm:
 Reconcile-by-absence is only sound on a **complete** fetch — a URI must be declared absent only if *all* pages were seen. This property must hold for **every** fetch entry point that feeds a reconcile, not just the CLI:
 
 - **CLI** — **naturally safe.** `probe_bookmark_endpoints` is all-or-nothing per endpoint: it returns a fully-paginated record list from one endpoint or raises `NoBookmarkEndpointError`, and on a raise `fetch_to_inventory` propagates the exception and writes nothing. There is no code path by which `fetch_to_inventory` reaches `merge_into_inventory` with a partial page set. No new guard code is needed; the spec records the property so it is not accidentally broken later.
-- **GUI helper path** (`/fetch`) — the GUI paginates the cursor chain itself and can be interrupted; it is **not** naturally safe and needs an explicit guard. See §8 and the GUI requirements doc §4.4.
-- **GUI Pyodide path** — runs the core `bsky_saves` fetch code in-browser. It inherits the all-or-nothing property **only if** it drives the reconcile from a completed `fetch_to_inventory` / `probe_bookmark_endpoints` call rather than accumulating raw `fetch_one_page` results itself. The implementation plan MUST confirm which entry point the Pyodide driver invokes and that it satisfies this property; if it does page-at-a-time accumulation, the GUI's reconcile-trigger timing must guard it the same way the helper path does.
+- **GUI helper path** (`/fetch`) — safe by GUI architecture: `fetchHydrator` paginates the full cursor chain before returning, and the reconcile runs in the `onAfterEnrich` callback that fires only afterwards; an interrupted fetch throws first. Confirmed by the GUI team's review; recorded as an invariant in the GUI requirements doc §4.4.
+- **GUI Pyodide path** — safe by GUI architecture: `runFetchOnly` returns the complete inventory or throws — there is no partial-progress state. Confirmed by the GUI team's review.
+
+All three entry points currently satisfy the property; none needs new guard code. It is recorded here, and as an invariant in the GUI doc §4.4, so a future refactor on either side does not silently break it.
 
 ### 6.4 Backward compatibility
 
@@ -252,7 +254,7 @@ Unit tests live in `tests/test_normalize.py` and `tests/test_fetch.py`, matching
 ### `merge_into_inventory` (`test_normalize.py`)
 
 - **Present-entry lifecycle:** `last_seen_at` set/refreshed; `removed_detected_at` cleared on reappearance.
-- **`subject_status` reconciliation:** live observation clears a prior status; `not_found`/`blocked` sets status + `subject_status_detected_at`; an unchanged status does not move `subject_status_detected_at`; `"unknown"` does not downgrade a known status; a brand-new `listRecords` URI stores `"unknown"`.
+- **`subject_status` reconciliation:** live observation clears a prior status; `not_found`/`blocked` sets status + `subject_status_detected_at`; an unchanged status does not move `subject_status_detected_at`; an `"unknown"`→known transition sets `subject_status_detected_at`; `"unknown"` is a no-op on *any* existing entry — it neither overwrites a `not_found`/`blocked` status nor adds a status to a previously-live entry, and never touches `subject_status_detected_at`; a brand-new `listRecords` URI stores `"unknown"`.
 - **Mode `keep-all`:** absent entry retained with `removed_detected_at`; prior hydrated content preserved when the latest `item` is `notFoundPost`.
 - **Mode `keep-lost`:** absent entry (Class 1) dropped; present dead-subject entry (Class 2) retained and flagged.
 - **Mode `sync`:** absent entry dropped; present dead-subject entry actively pruned; `"unknown"` entry kept; idempotency — a second `sync` run over the same fetch is a no-op on membership.
