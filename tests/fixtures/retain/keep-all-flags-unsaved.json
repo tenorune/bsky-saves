@@ -1,0 +1,22 @@
+{
+  "description": "keep-all retains an un-saved bookmark and stamps removed_detected_at; its last_seen_at stays at the prior value; results sorted by saved_at desc",
+  "mode": "keep-all",
+  "now": "2026-05-14T12:00:00Z",
+  "prior_inventory": {
+    "fetched_at": "2026-05-01T00:00:00Z",
+    "saves": [
+      {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": [], "last_seen_at": "2026-05-01T00:00:00Z"},
+      {"uri": "at://x/2", "saved_at": "2026-04-11T00:00:00Z", "post_text": "post B", "embed": null, "author": {"handle": "b", "display_name": "B", "did": "did:plc:b"}, "images": [], "last_seen_at": "2026-05-01T00:00:00Z"}
+    ]
+  },
+  "fetch_records": [
+    {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": []}
+  ],
+  "expected_output_inventory": {
+    "fetched_at": "2026-05-01T00:00:00Z",
+    "saves": [
+      {"uri": "at://x/2", "saved_at": "2026-04-11T00:00:00Z", "post_text": "post B", "embed": null, "author": {"handle": "b", "display_name": "B", "did": "did:plc:b"}, "images": [], "last_seen_at": "2026-05-01T00:00:00Z", "removed_detected_at": "2026-05-14T12:00:00Z"},
+      {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": [], "last_seen_at": "2026-05-14T12:00:00Z"}
+    ]
+  }
+}
