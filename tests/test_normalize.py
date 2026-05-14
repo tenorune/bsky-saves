@@ -299,6 +299,23 @@ def test_normalise_record_blocked_post_sets_subject_status():
     entry = normalise_record(raw)
     assert entry["subject_status"] == "blocked"
     assert entry["post_text"] == ""
+    assert entry["author"]["did"] == "did:plc:author"
+    assert entry["author"]["handle"] == ""
+
+
+def test_normalise_record_unknown_item_type_treated_as_live():
+    """An unrecognised item $type (e.g. a future union member) is treated as
+    live: no subject_status is emitted."""
+    raw = {
+        "createdAt": "2026-04-22T19:37:34Z",
+        "subject": {"uri": "at://author/post1"},
+        "item": {
+            "$type": "app.bsky.feed.defs#someFutureType",
+            "uri": "at://author/post1",
+        },
+    }
+    entry = normalise_record(raw)
+    assert "subject_status" not in entry
 
 
 def test_normalise_record_live_post_omits_subject_status():

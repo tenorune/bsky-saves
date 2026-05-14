@@ -27,6 +27,8 @@ def normalise_record(raw: dict) -> dict:
         post_uri = item.get("uri") or subject.get("uri", "")
         saved_at = raw.get("createdAt") or item.get("indexedAt", "")
         item_type = item.get("$type", "")
+        # Any other $type — a postView, an absent $type, or a future union
+        # member we don't recognise — is treated as live: no subject_status.
         if item_type == "app.bsky.feed.defs#notFoundPost":
             subject_status = "not_found"
         elif item_type == "app.bsky.feed.defs#blockedPost":
