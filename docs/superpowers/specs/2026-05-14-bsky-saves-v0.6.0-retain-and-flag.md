@@ -50,7 +50,7 @@ BlueSky bookmarks are stored off-protocol today in private storage ("stash"), mo
 
 ### Out of scope (explicitly deferred)
 
-- **`serve` changes.** `/fetch` stays a stateless, paginated, raw-page provider. Retention is structurally a *consumer* concern: it needs prior state and a *complete* fetch, neither of which a stateless paginated endpoint has. A mode-aware `serve` would be a stateful daemon — that is Option C. See §9.
+- **`serve` *logic* changes.** `serve.py` is untouched; `/fetch` stays a stateless, paginated, raw-page provider, and retention stays a structurally *consumer*-side concern (it needs prior state and a *complete* fetch, neither of which a stateless paginated endpoint has). A mode-aware `serve` would be a stateful daemon — that is Option C. See §9. **Note the distinction:** the `/fetch` *response shape* nonetheless gains `subject_status` additively — not from any `serve.py` change, but because `/fetch` calls `normalise_record`, which now emits it. No `serve` *code* changes; the response shape change is a downstream effect of the `normalize.py` work.
 - **Option C — the proactive capture daemon (`watch`).** A long-running daemon that captures saves continuously and owns the inventory file. Noted as the next follow-up after v0.6.0.
 - **A CLI `list --filter` command.** The filter is a GUI feature for v0.6.0; this spec only defines the category *predicates* (§5.3) so a CLI `list` can be a small, clean follow-up later.
 - **Active post-existence probing.** Distinguishing `not_found` / `blocked` is free from the `getBookmarks` `item` union (§6.1); no extra network calls are needed and none are added.
@@ -66,7 +66,7 @@ BlueSky bookmarks are stored off-protocol today in private storage ("stash"), mo
 | `src/bsky_saves/normalize.py` | `normalise_record` gains `subject_status` derivation from `item.$type` (and the latent-bug fix). `merge_into_inventory` gains `mode` and `now` keyword params, an explicit lifecycle-flag pass, and the `sync`-mode active prune. |
 | `src/bsky_saves/fetch.py` | `fetch_to_inventory` gains a `mode` parameter; passes `mode` and `now=_now_iso()` to `merge_into_inventory`. The "complete fetch" safety property is documented (see §6.3). |
 | `src/bsky_saves/cli.py` | `fetch` subcommand gains a mutually-exclusive group: `--mode {sync,keep-lost,keep-all}` (default `keep-lost`), `--sync` (alias for `--mode sync`), `--keep-all` (alias for `--mode keep-all`). `main()` passes `mode=args.mode` to `fetch_to_inventory`. |
-| `src/bsky_saves/serve.py` | No change. Listed here only to make the "no change" explicit and reviewable. |
+| `src/bsky_saves/serve.py` | No code change. Listed here to make the "no change" explicit and reviewable. (The `/fetch` *response shape* does gain `subject_status` — but as a downstream effect of `normalise_record` changing, not from any edit to `serve.py`. See §2 / §9.) |
 | `tests/test_normalize.py` | New tests for `normalise_record` `subject_status` derivation (each `item.$type`, listRecords shape) and for `merge_into_inventory` across all three modes and every lifecycle transition. |
 | `tests/test_fetch.py` | New tests for `fetch_to_inventory` mode plumbing and for the CLI argument parsing (`--mode`, `--sync`, `--keep-all`, the mutually-exclusive guard, the default). |
 | `README.md` | Document the three modes, the convenience aliases, and the four new schema fields. Update the "Inventory schema" block. |
@@ -148,7 +148,11 @@ The hydrated `app.bsky.bookmark.getBookmarks` entry's `item` field is a union (p
 
 `subject_status` is emitted on the entry only when it is non-live or `unknown`; a healthy entry has no `subject_status` key. `normalise_record` remains per-record and stateless — it does not see prior inventory state; all reconciliation of `subject_status` against history happens in `merge_into_inventory`.
 
+**This derivation lives in the core `bsky_saves` package (`normalize.py`) — not in any `serve`-layer code — and is therefore consumed identically by every path:** the CLI `fetch`, the `/fetch` endpoint (which calls `normalise_record` server-side), and the `bsky-saves-gui` Pyodide path (which runs the core package in-browser). There is no path-specific `subject_status` derivation. This matters for the GUI: a `serve`-only derivation would leave Pyodide-backed users with records that have no `subject_status`, which would silently break `sync`-mode's prune and the cross-implementation fixtures (§10.4) for that path.
+
 ### 6.2 `merge_into_inventory` — the three-mode reconcile
+
+v0.6.0 **replaces** `merge_into_inventory`'s current purely-additive behaviour (URI-keyed union, never deletes) with the three-mode reconcile below. This is the same algorithm the `bsky-saves-gui` reconcile must implement — the CLI and the GUI run one algorithm in two languages, kept honest by the shared fixtures (§10.4). "Matches the CLI," in the GUI requirements doc, means *this* algorithm, not the pre-0.6.0 one.
 
 New signature:
 
@@ -185,7 +189,11 @@ Algorithm:
 
 ### 6.3 The "complete fetch" safety property
 
-Reconcile-by-absence is only sound on a **complete** fetch — a URI must be declared absent only if *all* pages were seen. The CLI is **naturally safe**: `probe_bookmark_endpoints` is all-or-nothing per endpoint — it returns a fully-paginated record list from one endpoint or raises `NoBookmarkEndpointError`, and on a raise `fetch_to_inventory` propagates the exception and writes nothing. There is no code path by which `fetch_to_inventory` reaches `merge_into_inventory` with a partial page set. No new guard code is needed on the CLI side; the spec records the property so it is not accidentally broken later. (The GUI, which paginates `/fetch` itself and can be interrupted, is **not** naturally safe — see §8 / the GUI requirements doc.)
+Reconcile-by-absence is only sound on a **complete** fetch — a URI must be declared absent only if *all* pages were seen. This property must hold for **every** fetch entry point that feeds a reconcile, not just the CLI:
+
+- **CLI** — **naturally safe.** `probe_bookmark_endpoints` is all-or-nothing per endpoint: it returns a fully-paginated record list from one endpoint or raises `NoBookmarkEndpointError`, and on a raise `fetch_to_inventory` propagates the exception and writes nothing. There is no code path by which `fetch_to_inventory` reaches `merge_into_inventory` with a partial page set. No new guard code is needed; the spec records the property so it is not accidentally broken later.
+- **GUI helper path** (`/fetch`) — the GUI paginates the cursor chain itself and can be interrupted; it is **not** naturally safe and needs an explicit guard. See §8 and the GUI requirements doc §4.4.
+- **GUI Pyodide path** — runs the core `bsky_saves` fetch code in-browser. It inherits the all-or-nothing property **only if** it drives the reconcile from a completed `fetch_to_inventory` / `probe_bookmark_endpoints` call rather than accumulating raw `fetch_one_page` results itself. The implementation plan MUST confirm which entry point the Pyodide driver invokes and that it satisfies this property; if it does page-at-a-time accumulation, the GUI's reconcile-trigger timing must guard it the same way the helper path does.
 
 ### 6.4 Backward compatibility
 

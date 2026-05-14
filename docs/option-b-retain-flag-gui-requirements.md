@@ -16,6 +16,8 @@ Today the CLI and the GUI disagree about what happens to a bookmark that is no l
 
 `bsky-saves` 0.6.0 makes retention an explicit, user-chosen **policy** with three modes, and adds **lifecycle flags** so retained entries are distinguishable. The GUI must adopt the same policy and flags so the two surfaces finally agree.
 
+**Both sides change — this is not a GUI-only retrofit.** v0.6.0 rewrites the CLI's `merge_into_inventory` to the exact reconcile algorithm in §4: the purely-additive behaviour described above is *replaced*, not kept. So everywhere this doc says a behaviour "matches the CLI," it means the **new v0.6.0 CLI**, not today's. That symmetry is the whole point — one algorithm, two implementations (Python in `bsky-saves`, TypeScript here), kept honest by the shared golden fixtures (§6). The fixtures only enforce parity because both sides run the same new algorithm.
+
 Two classes of "no longer synced" entry, with different value:
 
 - **Class 1 — the user un-saved it.** The bookmark record left their repo. An explicit user gesture.
@@ -36,12 +38,14 @@ These are additive. An inventory that has none of them (written by a pre-0.6.0 t
 
 ### 2.1 `subject_status` arrives pre-populated — do NOT derive it in the GUI
 
-Both GUI data paths run `bsky_saves`'s `normalise_record`:
+`subject_status` derivation lives in **`normalise_record`, in the core `bsky_saves` package** (`bsky_saves/normalize.py`) — **not** in any `bsky-saves serve` wrapper code. There is no `serve`-layer-only derivation. This matters because the GUI has two fetch backends, and both run that same core function:
 
-- the **Pyodide path** runs it directly in the worker;
-- the **`/fetch` path** runs it server-side inside the `bsky-saves serve` daemon.
+- the **Pyodide path** runs the core `bsky_saves` package in-browser, so it executes `normalise_record` directly;
+- the **`/fetch` path** hits the `bsky-saves serve` daemon, which calls the same core `normalise_record` server-side.
 
-As of `bsky-saves` 0.6.0, `normalise_record` derives `subject_status` from the `app.bsky.bookmark.getBookmarks` `item` union (`postView` → live / field absent; `notFoundPost` → `"not_found"`; `blockedPost` → `"blocked"`; `listRecords` raw-record shape → `"unknown"`). So **`subject_status` is already on every record the GUI receives.** The GUI MUST NOT re-derive it and MUST NOT depend on inspecting raw `item.$type` itself — it consumes the normalised field.
+Because the derivation is in the shared core, **both backends produce records with `subject_status` populated identically.** There is no backend where it silently goes missing — which is essential, since `sync`-mode's dead-subject prune would otherwise no-op for Pyodide-backed users. (On the `bsky-saves` side this is tracked explicitly: see spec §6.1 — `subject_status` derivation is a `normalize.py` work item, consumed identically by the CLI, `/fetch`, and Pyodide.)
+
+As of `bsky-saves` 0.6.0, `normalise_record` derives `subject_status` from the `app.bsky.bookmark.getBookmarks` `item` union (`postView` → live / field absent; `notFoundPost` → `"not_found"`; `blockedPost` → `"blocked"`; `listRecords` raw-record shape → `"unknown"`). So **`subject_status` is already on every record the GUI receives, on every backend.** The GUI MUST NOT re-derive it and MUST NOT depend on inspecting raw `item.$type` itself — it consumes the normalised field.
 
 The GUI's job is the **reconcile** (§4) — the record-level union/drop/prune and the `last_seen_at` / `removed_detected_at` / `subject_status_detected_at` lifecycle bookkeeping. That part is a separate TypeScript reimplementation because `merge_into_inventory` (Python) is CLI-only.
 
@@ -88,7 +92,14 @@ Run this when assembling the inventory from a fetch. Inputs: the **prior invento
 
 ### 4.1 What changes in `library-refresh.ts`
 
-`mergeHydratedFields` today only does step 3's field-fill, iterating `newSaves`. It must be extended (or paired with a sibling function) to also do steps 4–5 — the record-level union/drop/prune — and step 3's lifecycle-flag pass. The function currently mutates fields, not membership; after this change it owns membership too.
+`mergeHydratedFields` today only does step 3's field-fill, iterating `newSaves`. The reconcile needs steps 4–5 (record-level union/drop/prune) and step 3's lifecycle-flag pass on top.
+
+This is a larger change than "modify `mergeHydratedFields`" reads, for two reasons:
+
+- **It owns array membership now, not just object fields.** `mergeHydratedFields` today returns `void` and mutates save *objects* in place — it never touches the `saves` *array*. Steps 4–5 require either in-place array splicing or returning a new inventory; the latter changes its call sites in `library-refresh.ts`.
+- **Its "never overwrite fresh data" invariant no longer holds.** The lifecycle-flag pass sometimes *clears* fields (`removed_detected_at` on reappearance, `subject_status` / `subject_status_detected_at` when a post goes live again) — that is not a "fill missing fields" operation.
+
+Realistically this becomes a new `reconcileInventory` that *wraps* `mergeHydratedFields` as its field-fill sub-step (step 3's first bullet), with the lifecycle pass and steps 4–5 around it. Treat the existing function as a building block, not the whole target.
 
 ### 4.2 Category predicates (for the filter UI — §5)
 
@@ -114,9 +125,13 @@ Absence-detection is only sound on a **complete** fetch: a URI may be declared a
 
 Running steps 4–5 on a partial page set would false-positive-flag live bookmarks as un-saved and, under `keep-lost` / `sync`, delete them. (The CLI does not have this hazard — its fetch layer is all-or-nothing — so this guard is GUI-specific.)
 
+**Helper path:** this guard is already satisfied naturally. The reconcile runs in `library-refresh.ts`'s `onAfterEnrich` callback, which fires only *after* the fetch hydrator has paginated the entire cursor chain to completion; an interrupted or failed helper fetch throws *before* `onAfterEnrich` runs. No new code is needed on the helper path — just don't move the reconcile earlier.
+
+**Pyodide path:** verify separately. It runs the core `bsky_saves` fetch code in-browser, which may have its own partial-progress semantics. Whichever `bsky_saves` entry point the Pyodide driver invokes, it must feed the reconcile only a *complete* fetch — see spec §6.3, which states this property for all fetch entry points including Pyodide.
+
 ### 4.5 Backward compatibility
 
-A prior inventory with none of the four flag fields (written by an older tool, or an older GUI export) is valid input. The first 0.6.0 reconcile populates `last_seen_at` / `subject_status` on still-present entries and treats every now-absent prior URI as Class 1. **Under the default `keep-lost`, that first run will drop prior entries no longer on the server** — including long-ago un-saved posts. This is intended and matches the CLI; see §5.1 for how the default view filter softens the user-visible impact.
+A prior inventory with none of the four flag fields (written by an older tool, or an older GUI export) is valid input. The first 0.6.0 reconcile populates `last_seen_at` / `subject_status` on still-present entries and treats every now-absent prior URI as Class 1. **Under the default `keep-lost`, that first run will drop prior entries no longer on the server** — including long-ago un-saved posts. This is intended and matches the new v0.6.0 CLI (which is rewritten to the same reconcile — see §1); see §5.1 for how the default view filter softens the user-visible impact.
 
 ## 5. UI surface
 
@@ -132,6 +147,8 @@ This pairing is the point: `keep-lost` mode means the §4.5 first-run drop still
 ### 5.2 The mode toggle
 
 Provide a user-facing setting equivalent to the CLI's `--mode` — three choices: `sync`, `keep-lost`, `keep-all`. Persist it with the rest of the GUI's library settings. Changing the mode takes effect on the next refresh; it does not retroactively rewrite the stored inventory (a later `sync` run will prune, a later `keep-all` run will simply stop dropping — consistent with the CLI).
+
+The toggle SHOULD present **descriptive labels**, not the bare `sync` / `keep-lost` / `keep-all` identifiers — the distinction between them is not self-evident from the names alone. Wording is a GUI-side UX decision, but the labels should convey: `sync` = mirror only what's live on the server; `keep-lost` = also keep posts removed outside your control; `keep-all` = also keep bookmarks you deliberately un-saved (a full archive).
 
 ### 5.3 The filter UI
 
@@ -149,6 +166,6 @@ The reconcile (§4) is implemented twice — in Python in `bsky-saves`, and in T
 
 ## 7. Out of scope for this work
 
-- Any change to the `bsky-saves serve` daemon or its `/fetch` endpoint — it stays a stateless, paginated, raw-page provider. Retention is a consumer-side concern.
+- Any change to the `bsky-saves serve` daemon *logic* — `serve.py` is untouched; `/fetch` stays a stateless, paginated, raw-page provider, and retention stays a consumer-side concern. **Note, however:** the `/fetch` *response shape* does gain `subject_status` additively — not because `serve` changed, but because `/fetch` calls `normalise_record`, which now emits it (§2.1). It is an additive field; existing readers that ignore unknown keys are unaffected. The GUI's MVP spec (`docs/bsky-saves-mvp-spec.md` §5.4), which documents the `/fetch` response, should gain a `subject_status` field entry once v0.6.0's record shape is final.
 - The proactive capture daemon (`watch` / "Option C").
 - Deriving `subject_status` in the GUI — it arrives pre-populated (§2.1).
