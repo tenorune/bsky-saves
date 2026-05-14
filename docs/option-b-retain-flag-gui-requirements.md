@@ -167,7 +167,15 @@ The reconcile (§4) is implemented twice — in Python in `bsky-saves`, and in T
 - **What they do not cover.** `subject_status` derivation — that is shared Python (§2.1), already unit-tested on the `bsky-saves` side. The fixtures are reconcile-only.
 - **Release gate.** Per the `bsky-saves` v0.6.0 spec §11.2: a coordinated release does not bump the bundled `gui_version` until both repos are green on these fixtures.
 
-## 7. Out of scope for this work
+## 7. Hydration: skip known-dead subjects
+
+A `subject_status` of `not_found` / `blocked` means the subject post is gone — its account is deactivated, the post was deleted, or the author blocked the user. The GUI must take that into account when driving hydration:
+
+- **Thread hydration — required GUI change.** The GUI must **exclude** entries whose `subject_status` is `not_found` or `blocked` from the `uris` list it POSTs to `serve`'s `/hydrate-threads`. That endpoint is a deliberately dumb URI-list thread-fetcher — it receives only bare URIs (no entry metadata, no `subject_status`), so it *cannot* and *should not* make this decision; the consumer that holds the inventory must. `app.bsky.feed.getPostThread` returns a `4xx` for a gone subject, so sending those URIs produces noisy `http_4xx` failures in the GUI's failed-modal for posts that were never hydratable. The `bsky-saves` CLI's `hydrate threads` already applies this skip on its side; the GUI must mirror it.
+- **Article / image hydration — no GUI change needed.** A `not_found` / `blocked` entry has an empty `embed` and empty `images`, so article-text and image hydration naturally have nothing to do — they no-op without any special-casing.
+- **It must be a pure runtime filter on the *current* `subject_status`** — never a persistent "do not hydrate" marker on the entry. `subject_status` is re-derived (and *cleared*) by every `fetch`/reconcile, and the reconcile's field-fill re-populates the entry's content when a subject is found again (e.g. an account comes back from deactivation). So once `subject_status` is gone, the entry must hydrate normally — threads, articles, and images all included. Filtering on the live value gives this for free; a sticky marker would break it.
+
+## 8. Out of scope for this work
 
 - Any change to the `bsky-saves serve` daemon *logic* — `serve.py` is untouched; `/fetch` stays a stateless, paginated, raw-page provider, and retention stays a consumer-side concern. **Note, however:** the `/fetch` *response shape* does gain `subject_status` additively — not because `serve` changed, but because `/fetch` calls `normalise_record`, which now emits it (§2.1). It is an additive field; existing readers that ignore unknown keys are unaffected. The GUI's MVP spec (`docs/bsky-saves-mvp-spec.md` §5.4), which documents the `/fetch` response, should gain a `subject_status` field entry once v0.6.0's record shape is final.
 - The proactive capture daemon (`watch` / "Option C").

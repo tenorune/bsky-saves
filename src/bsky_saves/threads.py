@@ -8,7 +8,9 @@ author DID matches the bookmarked post's author. Stored as
 thread.
 
 Idempotent: skips entries whose stored ``thread_schema_version`` matches
-the current value, or marked with ``thread_fetch_error``.
+the current value, marked with ``thread_fetch_error``, or whose
+``subject_status`` is ``not_found`` / ``blocked`` (the subject post is
+gone, so there is no thread to hydrate).
 
 Crash-safe: per-iteration atomic writes (added in v0.4.2) durably persist
 each save's hydration to disk before moving to the next, so a process
@@ -166,7 +168,20 @@ def hydrate_threads(
     saves = inv["saves"]
 
     pending = []
+    cleaned_stale_error = False
     for s in saves:
+        if s.get("subject_status") in ("not_found", "blocked"):
+            # The subject post is gone (deleted, or its account is
+            # deactivated / blocked), so there is no thread to hydrate and
+            # getPostThread would just 4xx. Skip it. subject_status is
+            # re-derived — and cleared — by every `fetch`, so if the subject
+            # is found again later this entry becomes hydratable on its own.
+            # Clear any stale thread_fetch_error left by a pre-fix run: a
+            # lingering error would itself block re-hydration once the
+            # subject returns (see the thread_fetch_error skip below).
+            if s.pop("thread_fetch_error", None) is not None:
+                cleaned_stale_error = True
+            continue
         if (
             "thread_replies" in s
             and s.get("thread_schema_version") == THREAD_SCHEMA_VERSION
@@ -175,6 +190,11 @@ def hydrate_threads(
         if s.get("thread_fetch_error"):
             continue
         pending.append(s)
+
+    if cleaned_stale_error:
+        # Persist the stale-error cleanup now so it survives an early return
+        # below (empty pending, or limit=0).
+        atomic_write_inventory(inventory_path, inv)
 
     if not pending:
         print("bsky-saves: nothing to hydrate", file=sys.stderr)

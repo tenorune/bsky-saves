@@ -731,3 +731,107 @@ def test_batched_run_matches_single_call_inventory(tmp_path, monkeypatch):
     for uri in saves_a:
         assert saves_a[uri] == saves_b[uri], f"mismatch on {uri}"
     assert single_run["fetched_at"] == batched_run["fetched_at"]
+
+
+# --- subject_status: skip thread hydration of gone subjects ---
+
+def test_hydrate_threads_skips_not_found_and_blocked_subjects(tmp_path, monkeypatch):
+    """Entries whose subject_status is not_found / blocked are skipped — the
+    subject post is gone, so getPostThread would just 4xx. Only live entries
+    reach fetch_thread."""
+    _silence_rate_limit(monkeypatch)
+    fetched: list[str] = []
+
+    def fake_fetch(uri, **kwargs):
+        fetched.append(uri)
+        return {"post": {"uri": uri, "author": {"did": OP}}, "replies": []}, None
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
+
+    dead = _make_pending_save("at://x/dead")
+    dead["subject_status"] = "not_found"
+    blocked = _make_pending_save("at://x/blocked")
+    blocked["subject_status"] = "blocked"
+    live = _make_pending_save("at://x/live")
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(
+        json.dumps(_make_inventory(dead, blocked, live)), encoding="utf-8"
+    )
+
+    success, failed, remaining = hydrate_threads(inv_path)
+
+    assert fetched == ["at://x/live"]  # only the live entry was fetched
+    assert (success, failed, remaining) == (1, 0, 0)
+    on_disk = {s["uri"]: s for s in json.loads(inv_path.read_text("utf-8"))["saves"]}
+    for uri in ("at://x/dead", "at://x/blocked"):
+        assert "thread_replies" not in on_disk[uri]
+        assert "thread_fetch_error" not in on_disk[uri]
+    assert on_disk["at://x/live"]["thread_schema_version"] == THREAD_SCHEMA_VERSION
+
+
+def test_hydrate_threads_clears_stale_thread_fetch_error_on_dead_subject(
+    tmp_path, monkeypatch
+):
+    """A not_found entry carrying a stale thread_fetch_error from a pre-fix
+    run has that error cleared and the cleanup persisted to disk — otherwise
+    the lingering error would itself block re-hydration if the subject is
+    found again later."""
+    _silence_rate_limit(monkeypatch)
+    fetched: list[str] = []
+
+    def fake_fetch(uri, **kwargs):
+        fetched.append(uri)
+        return {"post": {"uri": uri, "author": {"did": OP}}, "replies": []}, None
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
+
+    dead = _make_pending_save("at://x/dead")
+    dead["subject_status"] = "not_found"
+    dead["thread_fetch_error"] = "http_400"
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(_make_inventory(dead)), encoding="utf-8")
+
+    success, failed, remaining = hydrate_threads(inv_path)
+
+    assert fetched == []  # never fetched — it was skipped
+    assert (success, failed, remaining) == (0, 0, 0)
+    on_disk = json.loads(inv_path.read_text("utf-8"))["saves"][0]
+    assert "thread_fetch_error" not in on_disk  # stale error cleared + persisted
+
+
+def test_hydrate_threads_rehydrates_after_subject_status_cleared(
+    tmp_path, monkeypatch
+):
+    """The skip is a pure runtime filter on the *current* subject_status,
+    never a persistent marker: once a later fetch finds the subject again and
+    clears subject_status, the entry hydrates normally."""
+    _silence_rate_limit(monkeypatch)
+    fetched: list[str] = []
+
+    def fake_fetch(uri, **kwargs):
+        fetched.append(uri)
+        return {"post": {"uri": uri, "author": {"did": OP}}, "replies": []}, None
+
+    monkeypatch.setattr(_threads_mod, "fetch_thread", fake_fetch)
+
+    entry = _make_pending_save("at://x/1")
+    entry["subject_status"] = "not_found"
+    inv_path = tmp_path / "inv.json"
+    inv_path.write_text(json.dumps(_make_inventory(entry)), encoding="utf-8")
+
+    # While not_found: skipped, not fetched.
+    hydrate_threads(inv_path)
+    assert fetched == []
+    assert "thread_replies" not in json.loads(inv_path.read_text("utf-8"))["saves"][0]
+
+    # A later fetch finds the subject again and clears subject_status.
+    inv = json.loads(inv_path.read_text("utf-8"))
+    del inv["saves"][0]["subject_status"]
+    inv_path.write_text(json.dumps(inv), encoding="utf-8")
+
+    # Now it hydrates normally.
+    success, failed, remaining = hydrate_threads(inv_path)
+    assert fetched == ["at://x/1"]
+    assert (success, failed, remaining) == (1, 0, 0)
+    on_disk = json.loads(inv_path.read_text("utf-8"))["saves"][0]
+    assert on_disk["thread_schema_version"] == THREAD_SCHEMA_VERSION
