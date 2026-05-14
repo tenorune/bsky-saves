@@ -1,8 +1,6 @@
 """Tests for normalize.normalise_record / merge_into_inventory."""
 from __future__ import annotations
 
-import json
-
 from bsky_saves.normalize import _reconcile_subject_status, merge_into_inventory, normalise_record
 
 
