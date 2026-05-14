@@ -3,7 +3,7 @@
 > **Audience:** the `bsky-saves-gui` team.
 > **Pairs with:** `bsky-saves` v0.6.0. Canonical bsky-saves-side spec: `bsky-saves/docs/superpowers/specs/2026-05-14-bsky-saves-v0.6.0-retain-and-flag.md`.
 > **Status:** requirements for GUI-side work; deliver alongside `bsky-saves` 0.6.0.
-> **The anti-drift contract:** the flag schema (§2) and the reconcile rules (§4) MUST match the bsky-saves CLI implementation exactly. They are two implementations of one spec; if they diverge, the CLI inventory and the GUI inventory stop agreeing — which is the bug this whole change exists to fix.
+> **The anti-drift contract:** the flag schema (§2) and the reconcile rules (§4) MUST match the bsky-saves CLI implementation exactly. They are two implementations of one spec; if they diverge, the CLI inventory and the GUI inventory stop agreeing — which is the bug this whole change exists to fix. §6 makes that contract executable: a shared golden-fixture set both repos run in CI.
 
 ---
 
@@ -137,7 +137,17 @@ Provide a user-facing setting equivalent to the CLI's `--mode` — three choices
 
 A filter control over the library view with the four categories from §4.2: `synced`, `lost`, `unsaved`, `all`. This is the "archive" experience the retention modes exist to enable — the user filtering their inventory by lifecycle state. Because `lost` and `unsaved` overlap, implement the filter as predicate matching, not as a partition.
 
-## 6. Out of scope for this work
+## 6. Testing — the shared golden fixtures (required CI input)
+
+The reconcile (§4) is implemented twice — in Python in `bsky-saves`, and in TypeScript here. A shared golden-fixture set is what keeps the two from drifting, and **running it in the GUI's CI is a required part of this work.**
+
+- **Source.** The fixtures live in the `bsky-saves` repo at `tests/fixtures/retain/` (the canonical spec home). The GUI consumes the *same files* — via a git submodule or a pinned raw-content fetch in CI; your choice. Do **not** copy them into the GUI repo — a copy is a drift vector.
+- **Format.** Each fixture is one JSON case: `{prior_inventory, fetch_records, mode, now, expected_output_inventory}`. `fetch_records` are already-normalised entries — the fixtures exercise the **reconcile**, not normalisation.
+- **The GUI's obligation.** The GUI test suite must run every fixture through its reconcile function (the extended `mergeHydratedFields` or its sibling, §4.1) and assert the result equals `expected_output_inventory`. A fixture that passes in `bsky-saves` but fails here means the GUI reconcile has drifted from the spec — that is the alarm, and it must block the GUI release.
+- **What they do not cover.** `subject_status` derivation — that is shared Python (§2.1), already unit-tested on the `bsky-saves` side. The fixtures are reconcile-only.
+- **Release gate.** Per the `bsky-saves` v0.6.0 spec §11.2: a coordinated release does not bump the bundled `gui_version` until both repos are green on these fixtures.
+
+## 7. Out of scope for this work
 
 - Any change to the `bsky-saves serve` daemon or its `/fetch` endpoint — it stays a stateless, paginated, raw-page provider. Retention is a consumer-side concern.
 - The proactive capture daemon (`watch` / "Option C").

@@ -46,6 +46,7 @@ BlueSky bookmarks are stored off-protocol today in private storage ("stash"), mo
 - **Shared category predicates:** the spec defines `synced` / `lost` / `unsaved` / `all` as predicates over the flag fields so any consumer (the GUI's filter UI, a future CLI `list`) classifies entries identically — §5.3.
 - **`README.md`:** document the modes and the new schema fields.
 - **GUI requirements doc:** `docs/option-b-retain-flag-gui-requirements.md`, the handoff artifact for the `bsky-saves-gui` team — §8.
+- **Shared cross-implementation fixtures:** `tests/fixtures/retain/` — golden `(prior, fetch, mode, now) → expected` cases, consumed by both the bsky-saves and the bsky-saves-gui test suites as the executable anti-drift contract — §10.4.
 
 ### Out of scope (explicitly deferred)
 
@@ -76,6 +77,7 @@ BlueSky bookmarks are stored off-protocol today in private storage ("stash"), mo
 | File | Responsibility |
 |---|---|
 | `docs/option-b-retain-flag-gui-requirements.md` | The external contract for the `bsky-saves-gui` team: the flag schema, the reconcile rules, the category predicates, the mode toggle, the partial-fetch guard, and the default-mode / default-filter guidance. Mirror of §4–§6 written for the GUI audience. |
+| `tests/fixtures/retain/*.json` | The shared golden-fixture set: `(prior_inventory, fetch_records, mode, now) → expected_output_inventory` cases. Authored here (the canonical spec home); the `bsky-saves-gui` test suite consumes the same files. See §10.4. |
 
 ### Module-boundary intent
 
@@ -230,7 +232,7 @@ The retain/sync decision needs two inputs: the **prior inventory** and a **compl
 
 ## 10. Testing
 
-All in `tests/test_normalize.py` and `tests/test_fetch.py`, matching the existing layout.
+Unit tests live in `tests/test_normalize.py` and `tests/test_fetch.py`, matching the existing layout. In addition, a shared cross-implementation fixture set (§10.4) is the executable form of the anti-drift contract between this implementation and the GUI's.
 
 ### `normalise_record` (`test_normalize.py`)
 
@@ -254,6 +256,34 @@ All in `tests/test_normalize.py` and `tests/test_fetch.py`, matching the existin
 - `fetch_to_inventory` passes `mode` and `now` through to `merge_into_inventory`.
 - CLI: `--mode` parses each of the three values; `--sync` and `--keep-all` resolve to the right `args.mode`; the default is `keep-lost`; supplying two of the mutually-exclusive flags is an argument error.
 
+### 10.4 Shared golden fixtures (`tests/fixtures/retain/`)
+
+The reconcile logic of §6.2 is implemented twice — here in Python (`merge_into_inventory`) and again in TypeScript in `bsky-saves-gui`. The shared fixtures are what keep the two from drifting.
+
+- **Format.** Each fixture is a JSON file describing one case: `{prior_inventory, fetch_records, mode, now, expected_output_inventory}`. `fetch_records` are already-normalised entries (post-`normalise_record`) — the fixtures exercise the *reconcile*, not normalisation.
+- **Scope.** They cover the reconcile only — the genuinely-duplicated logic. They do **not** cover `normalise_record`'s `subject_status` derivation: that is shared Python (the GUI runs it via Pyodide, or receives its output pre-populated from `/fetch`), so §10.1's unit tests are sufficient for that half.
+- **Coverage.** At minimum one fixture per row of the §10.2 `merge_into_inventory` test list — every mode, every lifecycle transition, the Class-1-masks-Class-2 case, and the backward-compatibility (flag-less prior) case — plus an idempotency case (running the same fixture's `fetch_records` twice yields a stable membership set).
+- **Consumption.** The bsky-saves suite runs every fixture against `merge_into_inventory` and asserts byte-equality with `expected_output_inventory`. The `bsky-saves-gui` suite consumes the *same files* (via git submodule or a pinned raw-content fetch in CI — the GUI team's choice) and asserts the same against its reconcile function. A fixture failing on either side is the drift alarm.
+- **Authoring order.** The fixtures are authored *first*, before either implementation — they are the executable form of §6.2.
+
 ## 11. Release
 
 `bsky-saves` is at `0.5.1`. v0.6.0 is a feature release: a new inventory-schema surface (four optional fields) and a new CLI flag, both additive at the wire level but with a documented behaviour change in the default (§6.4). Bump `pyproject.toml` `version = "0.6.0"`. The release notes MUST call out the §6.4 default-mode behaviour change and point users who want the old additive behaviour at `--keep-all`.
+
+### 11.1 Coordination with `bsky-saves-gui`
+
+Since v0.5.0 the wheel vendors a pinned `bsky-saves-gui` bundle (`[tool.bsky-saves] gui_version` + `gui-dist.sha256`). If v0.6.0 ships the bsky-saves-side retention work but bundles a GUI that does not implement the §4 reconcile of the GUI requirements doc, then `serve --gui` ships a GUI inconsistent with the CLI — the very drift this release exists to end.
+
+**Strategy: parallel implementation, coordinated release as the goal, graceful CLI-only fallback if the GUI slips.**
+
+- **Implementation** proceeds in parallel — the two repos are independent codebases. The shared fixtures (§10.4) are authored first and committed here; both repos' CI runs them.
+- **Preferred release:** a coordinated release — v0.6.0 bumps `gui_version` (and `gui-dist.sha256`) to a `bsky-saves-gui` release that passes the shared fixtures. The wheel ships both halves consistent.
+- **Fallback:** the bsky-saves release is **not hard-blocked** on the GUI. The new schema fields are additive at the wire level, so an older bundled GUI simply ignores them and keeps its current replace-semantics — degraded (no retention UI), not broken. If the GUI slips, v0.6.0 may ship CLI-only with the *existing* `gui_version` pin, fast-followed by a v0.6.1 that only bumps the pin.
+
+### 11.2 Release gate
+
+Following the repo's established v0.2 precedent (*"do not merge / do not tag until the integration test passes"*):
+
+- **Do not bump `gui_version`, and do not tag `v0.6.0` with a bumped pin, until both `bsky-saves` and `bsky-saves-gui` are green on the shared golden fixtures (§10.4).**
+- The existing `smoke.yml` workflow is extended with one thin check: a `/fetch` round-trip carries `subject_status` through to the response. This catches wiring breaks; the fixtures catch logic drift.
+- A heavy end-to-end (headless-browser + Pyodide) gate is explicitly **not** adopted — it is slow and flaky, and the deterministic golden fixtures already provide the real cross-implementation guarantee.
