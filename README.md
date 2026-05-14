@@ -51,7 +51,8 @@ bsky-saves fetch --inventory ./saves_inventory.json
 # Retention mode controls what happens to bookmarks no longer on the server.
 #   keep-lost (default) — keep posts removed outside your control (deleted /
 #                         blocked), drop bookmarks you deliberately un-saved.
-#   --sync     (= --mode sync)     — mirror only what is live on the server.
+#   --sync     (= --mode sync)     — keep only live posts; also drops posts
+#                                    deleted/blocked (unknown-status kept).
 #   --keep-all (= --mode keep-all) — keep everything, including your un-saves.
 bsky-saves fetch --inventory ./saves_inventory.json --keep-all
 
@@ -77,14 +78,15 @@ bsky-saves serve
 bsky-saves serve --gui
 ```
 
-All commands are **idempotent**: running them again skips already-hydrated
-entries and adds only what's new. Failures are recorded inline (e.g.
-`article_fetch_error`) so subsequent runs don't pointlessly re-hit them.
+All commands are **safe to re-run**: `hydrate`/`enrich` skip already-hydrated
+entries and add only what's new (`fetch` re-syncs the full bookmark list each
+run). Failures are recorded inline (e.g. `article_fetch_error`) so subsequent
+runs don't pointlessly re-hit them.
 
 **Behaviour change in v0.6.0:** the default retention mode is `keep-lost`.
 Before v0.6.0 the CLI was purely additive — it never removed an inventory
-entry. From v0.6.0, the first `fetch` after upgrading will drop entries that
-are no longer on the server *and* that you had un-saved. Run with
+entry. From v0.6.0, the first `fetch` after upgrading will drop entries you had
+un-saved (no longer in your bookmark list on the server). Run with
 `--keep-all` to preserve the old additive-everything behaviour.
 
 ## `bsky-saves serve`
@@ -174,7 +176,7 @@ The full HTTP API contracts live in the consumer repo:
       ],
       // Lifecycle flags (added by `fetch`; see retention modes above):
       "last_seen_at": "2026-04-30T14:00:00Z",          // last fetch that saw this URI
-      "removed_detected_at": "2026-05-02T09:00:00Z",   // optional; you un-saved it
+      "removed_detected_at": "2026-05-02T09:00:00Z",   // optional; you un-saved it (retained only under --keep-all)
       "subject_status": "not_found",                   // optional; "not_found" | "blocked" | "unknown"
       "subject_status_detected_at": "2026-05-02T09:00:00Z", // optional; when subject_status went non-live
       "quoted_post": { /* optional, when the save quote-posts another post */ },
