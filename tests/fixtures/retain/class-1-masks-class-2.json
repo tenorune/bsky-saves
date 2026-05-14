@@ -1,0 +1,22 @@
+{
+  "description": "Class 1 masks Class 2: under keep-all, an entry that was already flagged not_found (Class 2) and is now absent from the fetch (Class 1) is retained carrying BOTH removed_detected_at and its pre-existing subject_status / subject_status_detected_at",
+  "mode": "keep-all",
+  "now": "2026-05-14T12:00:00Z",
+  "prior_inventory": {
+    "fetched_at": "2026-05-01T00:00:00Z",
+    "saves": [
+      {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": [], "last_seen_at": "2026-05-01T00:00:00Z"},
+      {"uri": "at://x/2", "saved_at": "2026-04-11T00:00:00Z", "post_text": "post B", "embed": null, "author": {"handle": "b", "display_name": "B", "did": "did:plc:b"}, "images": [], "last_seen_at": "2026-05-01T00:00:00Z", "subject_status": "not_found", "subject_status_detected_at": "2026-05-05T00:00:00Z"}
+    ]
+  },
+  "fetch_records": [
+    {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": []}
+  ],
+  "expected_output_inventory": {
+    "fetched_at": "2026-05-01T00:00:00Z",
+    "saves": [
+      {"uri": "at://x/2", "saved_at": "2026-04-11T00:00:00Z", "post_text": "post B", "embed": null, "author": {"handle": "b", "display_name": "B", "did": "did:plc:b"}, "images": [], "last_seen_at": "2026-05-01T00:00:00Z", "subject_status": "not_found", "subject_status_detected_at": "2026-05-05T00:00:00Z", "removed_detected_at": "2026-05-14T12:00:00Z"},
+      {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": [], "last_seen_at": "2026-05-14T12:00:00Z"}
+    ]
+  }
+}

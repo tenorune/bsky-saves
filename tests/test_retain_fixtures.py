@@ -29,3 +29,12 @@ def test_retain_golden_fixture(fixture_path):
         now=case["now"],
     )
     assert result == case["expected_output_inventory"], case["description"]
+    # Idempotency (spec section 10.4): re-running the reconcile on its own
+    # output with the same fetch must yield a stable result.
+    second = merge_into_inventory(
+        result,
+        case["fetch_records"],
+        mode=case["mode"],
+        now=case["now"],
+    )
+    assert second == result, f"{case['description']} (not idempotent)"
