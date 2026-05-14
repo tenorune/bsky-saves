@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from bsky_saves.normalize import merge_into_inventory, normalise_record
+from bsky_saves.normalize import _reconcile_subject_status, merge_into_inventory, normalise_record
 
 
 # ---------- merge_into_inventory ----------
@@ -41,7 +41,7 @@ def test_merge_preserves_existing_entries():
             "author": {"handle": "b", "display_name": "B", "did": "did:plc:b"},
         },
     ]
-    merged = merge_into_inventory(existing, new_entries)
+    merged = merge_into_inventory(existing, new_entries, now=_NOW)
     by_uri = {s["uri"]: s for s in merged["saves"]}
     assert by_uri["at://x/1"]["post_text"] == "original"
     assert by_uri["at://x/2"]["post_text"] == "new"
@@ -70,7 +70,7 @@ def test_merge_backfills_missing_fields():
             "images": [{"kind": "image", "url": "https://cdn/x.jpg", "alt": "alt"}],
         },
     ]
-    merged = merge_into_inventory(existing, new_entries)
+    merged = merge_into_inventory(existing, new_entries, now=_NOW)
     e = {s["uri"]: s for s in merged["saves"]}["at://x/1"]
     assert e["post_text"] == "original"
     assert e["images"] == [{"kind": "image", "url": "https://cdn/x.jpg", "alt": "alt"}]
@@ -98,7 +98,7 @@ def test_merge_backfills_empty_existing_field():
             "author": {},
         },
     ]
-    merged = merge_into_inventory(existing, new_entries)
+    merged = merge_into_inventory(existing, new_entries, now=_NOW)
     e = {s["uri"]: s for s in merged["saves"]}["at://x/1"]
     assert e["post_text"] == "new text"
     assert e["embed"]["url"] == "https://e/"
@@ -111,12 +111,12 @@ def test_merge_sorts_by_saved_at_desc():
         {"uri": "at://x/B", "saved_at": "2026-04-12T00:00:00Z", "post_text": "", "embed": None, "author": {}},
         {"uri": "at://x/C", "saved_at": "2026-04-11T00:00:00Z", "post_text": "", "embed": None, "author": {}},
     ]
-    merged = merge_into_inventory(existing, new_entries)
+    merged = merge_into_inventory(existing, new_entries, now=_NOW)
     saved_ats = [s["saved_at"] for s in merged["saves"]]
     assert saved_ats == sorted(saved_ats, reverse=True)
 
 
-def test_merge_idempotent_when_no_new_saves():
+def test_merge_adds_last_seen_at_without_disturbing_content():
     seed = {
         "fetched_at": "2026-04-01T00:00:00Z",
         "saves": [
@@ -129,11 +129,13 @@ def test_merge_idempotent_when_no_new_saves():
             }
         ],
     }
-    new_entries = [seed["saves"][0].copy()]
-    merged = merge_into_inventory(seed, new_entries)
-    assert sorted(json.dumps(s, sort_keys=True) for s in merged["saves"]) == sorted(
-        json.dumps(s, sort_keys=True) for s in seed["saves"]
-    )
+    new_entries = [dict(seed["saves"][0])]
+    merged = merge_into_inventory(seed, new_entries, mode="keep-lost", now=_NOW)
+    assert len(merged["saves"]) == 1
+    entry = merged["saves"][0]
+    assert entry["last_seen_at"] == _NOW
+    content = {k: v for k, v in entry.items() if k != "last_seen_at"}
+    assert content == seed["saves"][0]
 
 
 # ---------- normalise_record ----------
@@ -349,8 +351,6 @@ def test_normalise_record_listrecords_shape_is_unknown():
 
 # ---------- _reconcile_subject_status ----------
 
-from bsky_saves.normalize import _reconcile_subject_status
-
 _NOW = "2026-05-14T12:00:00Z"
 
 
@@ -415,3 +415,72 @@ def test_reconcile_unknown_is_noop_over_existing_live_entry():
     _reconcile_subject_status(working, prior, {"subject_status": "unknown"}, _NOW)
     assert "subject_status" not in working
     assert "subject_status_detected_at" not in working
+
+
+# ---------- merge_into_inventory: present-entry lifecycle ----------
+
+def test_merge_sets_last_seen_at_on_present_entry():
+    existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": [
+        {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "p",
+         "embed": None, "author": {}, "images": []},
+    ]}
+    new_entries = [
+        {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "p",
+         "embed": None, "author": {}, "images": []},
+    ]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    assert merged["saves"][0]["last_seen_at"] == _NOW
+
+
+def test_merge_clears_removed_detected_at_on_reappearance():
+    existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": [
+        {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "p",
+         "embed": None, "author": {}, "images": [],
+         "removed_detected_at": "2026-05-10T00:00:00Z"},
+    ]}
+    new_entries = [
+        {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "p",
+         "embed": None, "author": {}, "images": []},
+    ]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    assert "removed_detected_at" not in merged["saves"][0]
+
+
+def test_merge_applies_subject_status_for_present_dead_subject():
+    existing = {"fetched_at": None, "saves": []}
+    new_entries = [
+        {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "",
+         "embed": None, "author": {}, "images": [], "subject_status": "not_found"},
+    ]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    assert merged["saves"][0]["subject_status"] == "not_found"
+    assert merged["saves"][0]["subject_status_detected_at"] == _NOW
+
+
+def test_merge_now_is_keyword_only_and_required():
+    import pytest
+    with pytest.raises(TypeError):
+        merge_into_inventory({"fetched_at": None, "saves": []}, [])
+
+
+def test_merge_preserves_prior_content_when_subject_dies():
+    """When the fresh record is a content-empty dead-subject entry, the prior
+    hydrated content (post_text / author / images) is preserved by field-fill
+    while the new subject_status is still applied."""
+    existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": [
+        {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z",
+         "post_text": "the original text", "embed": None,
+         "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"},
+         "images": [{"kind": "image", "url": "https://cdn/x.jpg", "alt": ""}]},
+    ]}
+    new_entries = [
+        {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "",
+         "embed": None, "author": {"handle": "", "display_name": "", "did": ""},
+         "images": [], "subject_status": "not_found"},
+    ]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    entry = merged["saves"][0]
+    assert entry["post_text"] == "the original text"
+    assert entry["author"]["handle"] == "a"
+    assert entry["images"] == [{"kind": "image", "url": "https://cdn/x.jpg", "alt": ""}]
+    assert entry["subject_status"] == "not_found"

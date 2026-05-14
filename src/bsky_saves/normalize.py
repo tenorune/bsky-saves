@@ -199,6 +199,11 @@ def extract_quoted_post(view: dict) -> dict | None:
     }
 
 
+_LIFECYCLE_KEYS = frozenset(
+    {"subject_status", "subject_status_detected_at", "last_seen_at", "removed_detected_at"}
+)
+
+
 def _reconcile_subject_status(
     working: dict, prior: dict | None, fresh: dict, now: str
 ) -> None:
@@ -239,32 +244,49 @@ def _reconcile_subject_status(
             working["subject_status_detected_at"] = prior_detected
 
 
-def merge_into_inventory(existing: dict, new_entries: list[dict]) -> dict:
-    """Merge new_entries into existing inventory.
+def merge_into_inventory(
+    existing: dict,
+    new_entries: list[dict],
+    *,
+    mode: str = "keep-lost",
+    now: str,
+) -> dict:
+    """Merge new_entries into existing inventory under a retention mode.
 
-    Rules:
-    - Keyed by ``uri``.
-    - For URIs already in the inventory: ADD missing fields from the new
-      entry, but never overwrite a non-empty existing value. Preserves
-      hydration fields written by other commands (article_text,
-      thread_replies, etc.).
-    - For new URIs: append the entry as-is.
-    - Result sorted by ``saved_at`` desc (newest first).
-    - ``fetched_at`` updated by the caller.
+    ``mode`` is one of "sync", "keep-lost" (default), "keep-all". ``now`` is
+    the fetch timestamp, written into the lifecycle flags. See the v0.6.0 spec
+    section 6.2 for the full algorithm.
+
+    Present entries: field-fill (never overwrite a non-empty existing value;
+    lifecycle keys are owned by the flag pass, not the field-fill) plus a
+    lifecycle-flag pass. Absent entries (Class 1) and the sync prune are added
+    in later tasks.
     """
     by_uri: dict[str, dict] = {s["uri"]: dict(s) for s in existing.get("saves", [])}
+    fetched_uris = {e["uri"] for e in new_entries if e.get("uri")}
+
     for entry in new_entries:
         uri = entry.get("uri", "")
         if not uri:
             continue
-        if uri in by_uri:
-            existing_entry = by_uri[uri]
+        prior = by_uri.get(uri)
+        if prior is not None:
+            prior_snapshot = dict(prior)
+            working = prior
             for k, v in entry.items():
-                cur = existing_entry.get(k)
+                if k in _LIFECYCLE_KEYS:
+                    continue
+                cur = working.get(k)
                 if cur in (None, "", [], {}):
-                    existing_entry[k] = v
+                    working[k] = v
         else:
-            by_uri[uri] = dict(entry)
+            prior_snapshot = None
+            working = dict(entry)
+            by_uri[uri] = working
+        working["last_seen_at"] = now
+        working.pop("removed_detected_at", None)
+        _reconcile_subject_status(working, prior_snapshot, entry, now)
+
     saves = sorted(by_uri.values(), key=lambda s: s.get("saved_at", ""), reverse=True)
     return {
         "fetched_at": existing.get("fetched_at"),
