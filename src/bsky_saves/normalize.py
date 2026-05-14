@@ -199,6 +199,46 @@ def extract_quoted_post(view: dict) -> dict | None:
     }
 
 
+def _reconcile_subject_status(
+    working: dict, prior: dict | None, fresh: dict, now: str
+) -> None:
+    """Reconcile subject_status / subject_status_detected_at on `working`.
+
+    `prior` is the entry as it stood before this merge (or None for a
+    brand-new URI); `fresh` is the newly-fetched normalised record. `working`
+    is mutated in place. See the v0.6.0 spec section 6.2.
+    """
+    fresh_status = fresh.get("subject_status")
+    prior_status = prior.get("subject_status") if prior is not None else None
+    prior_detected = (
+        prior.get("subject_status_detected_at") if prior is not None else None
+    )
+
+    working.pop("subject_status", None)
+    working.pop("subject_status_detected_at", None)
+
+    if fresh_status is None:
+        # Live observation — both fields stay cleared.
+        return
+    if fresh_status in ("not_found", "blocked"):
+        working["subject_status"] = fresh_status
+        if prior_status == fresh_status and prior_detected is not None:
+            working["subject_status_detected_at"] = prior_detected
+        else:
+            working["subject_status_detected_at"] = now
+        return
+    # fresh_status == "unknown": never overwrites, weakens, or clears an
+    # existing entry; stored only for a brand-new URI; never sets the
+    # timestamp.
+    if prior is None:
+        working["subject_status"] = "unknown"
+    else:
+        if prior_status is not None:
+            working["subject_status"] = prior_status
+        if prior_detected is not None:
+            working["subject_status_detected_at"] = prior_detected
+
+
 def merge_into_inventory(existing: dict, new_entries: list[dict]) -> dict:
     """Merge new_entries into existing inventory.
 

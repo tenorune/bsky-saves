@@ -345,3 +345,73 @@ def test_normalise_record_listrecords_shape_is_unknown():
     entry = normalise_record(raw)
     assert entry["subject_status"] == "unknown"
     assert entry["uri"] == "at://author/post1"
+
+
+# ---------- _reconcile_subject_status ----------
+
+from bsky_saves.normalize import _reconcile_subject_status
+
+_NOW = "2026-05-14T12:00:00Z"
+
+
+def test_reconcile_live_clears_prior_status():
+    working = {}
+    prior = {"subject_status": "not_found", "subject_status_detected_at": "2026-05-01T00:00:00Z"}
+    fresh = {}  # no subject_status -> live
+    _reconcile_subject_status(working, prior, fresh, _NOW)
+    assert "subject_status" not in working
+    assert "subject_status_detected_at" not in working
+
+
+def test_reconcile_not_found_on_brand_new_uri_sets_timestamp():
+    working = {}
+    _reconcile_subject_status(working, None, {"subject_status": "not_found"}, _NOW)
+    assert working["subject_status"] == "not_found"
+    assert working["subject_status_detected_at"] == _NOW
+
+
+def test_reconcile_unchanged_status_carries_timestamp_forward():
+    working = {}
+    prior = {"subject_status": "not_found", "subject_status_detected_at": "2026-05-01T00:00:00Z"}
+    _reconcile_subject_status(working, prior, {"subject_status": "not_found"}, _NOW)
+    assert working["subject_status"] == "not_found"
+    assert working["subject_status_detected_at"] == "2026-05-01T00:00:00Z"
+
+
+def test_reconcile_changed_status_is_a_transition():
+    working = {}
+    prior = {"subject_status": "not_found", "subject_status_detected_at": "2026-05-01T00:00:00Z"}
+    _reconcile_subject_status(working, prior, {"subject_status": "blocked"}, _NOW)
+    assert working["subject_status"] == "blocked"
+    assert working["subject_status_detected_at"] == _NOW
+
+
+def test_reconcile_unknown_to_known_is_a_transition():
+    working = {}
+    prior = {"subject_status": "unknown"}
+    _reconcile_subject_status(working, prior, {"subject_status": "not_found"}, _NOW)
+    assert working["subject_status"] == "not_found"
+    assert working["subject_status_detected_at"] == _NOW
+
+
+def test_reconcile_unknown_on_brand_new_uri_stores_unknown_no_timestamp():
+    working = {}
+    _reconcile_subject_status(working, None, {"subject_status": "unknown"}, _NOW)
+    assert working["subject_status"] == "unknown"
+    assert "subject_status_detected_at" not in working
+
+
+def test_reconcile_unknown_is_noop_over_existing_known_status():
+    working = {}
+    prior = {"subject_status": "not_found", "subject_status_detected_at": "2026-05-01T00:00:00Z"}
+    _reconcile_subject_status(working, prior, {"subject_status": "unknown"}, _NOW)
+    assert working["subject_status"] == "not_found"
+    assert working["subject_status_detected_at"] == "2026-05-01T00:00:00Z"
+
+
+def test_reconcile_unknown_is_noop_over_existing_live_entry():
+    working = {}
+    prior = {}  # prior exists but was live (no subject_status)
+    _reconcile_subject_status(working, prior, {"subject_status": "unknown"}, _NOW)
+    assert "subject_status" not in working
+    assert "subject_status_detected_at" not in working
