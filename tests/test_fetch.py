@@ -182,43 +182,110 @@ def _bookmark_record(uri: str, saved_at: str = "2026-04-12T18:31:00Z") -> dict:
 
 
 @respx.mock
-def test_fetch_to_inventory_no_write_when_no_new_saves(tmp_path, monkeypatch):
-    """Second fetch with the same bookmarks must leave the inventory file
-    untouched (no fetched_at bump, no rewrite). Two distinct timestamps
-    from monkeypatched _now_iso make a coincidental same-second pass impossible."""
+def test_fetch_to_inventory_advances_last_seen_at_every_run(tmp_path, monkeypatch):
+    """Per spec section 6.5: because last_seen_at advances on every run, a
+    second fetch of the same bookmarks rewrites the inventory (the old
+    "no write when unchanged" behaviour is intentionally gone)."""
     _mock_create_session()
     respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
         return_value=httpx.Response(
             200, json={"bookmarks": [_bookmark_record("at://x/p/1")]}
         )
     )
-
     inv_path = tmp_path / "inv.json"
-
     timestamps = iter(["2026-04-12T00:00:00Z", "2026-04-12T01:00:00Z"])
     monkeypatch.setattr(_fetch_mod, "_now_iso", lambda: next(timestamps))
 
     _fetch_mod.fetch_to_inventory(
-        inv_path,
-        handle="user.bsky.social",
-        app_password="app-password",
-        pds_base=PDS_BASE,
-        appview_base=APPVIEW_BASE,
+        inv_path, handle="user.bsky.social", app_password="app-password",
+        pds_base=PDS_BASE, appview_base=APPVIEW_BASE,
     )
     first = json.loads(inv_path.read_text(encoding="utf-8"))
-    assert first["fetched_at"] == "2026-04-12T00:00:00Z"
+    assert first["saves"][0]["last_seen_at"] == "2026-04-12T00:00:00Z"
 
+    respx.reset()
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200, json={"bookmarks": [_bookmark_record("at://x/p/1")]}
+        )
+    )
     _fetch_mod.fetch_to_inventory(
-        inv_path,
-        handle="user.bsky.social",
-        app_password="app-password",
-        pds_base=PDS_BASE,
-        appview_base=APPVIEW_BASE,
+        inv_path, handle="user.bsky.social", app_password="app-password",
+        pds_base=PDS_BASE, appview_base=APPVIEW_BASE,
     )
     second = json.loads(inv_path.read_text(encoding="utf-8"))
-    assert second["fetched_at"] == "2026-04-12T00:00:00Z", (
-        "second fetch with no new bookmarks must not bump fetched_at"
+    assert second["saves"][0]["last_seen_at"] == "2026-04-12T01:00:00Z"
+    assert second["fetched_at"] == "2026-04-12T01:00:00Z"
+
+
+@respx.mock
+def test_fetch_to_inventory_keep_lost_drops_unsaved_bookmark(tmp_path):
+    """A bookmark present on the first fetch but gone on the second is
+    dropped under the default keep-lost mode."""
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200, json={"bookmarks": [
+                _bookmark_record("at://x/p/1"),
+                _bookmark_record("at://x/p/2", saved_at="2026-04-13T00:00:00Z"),
+            ]}
+        )
     )
+    inv_path = tmp_path / "inv.json"
+    _fetch_mod.fetch_to_inventory(
+        inv_path, handle="user.bsky.social", app_password="app-password",
+        pds_base=PDS_BASE, appview_base=APPVIEW_BASE,
+    )
+    assert len(json.loads(inv_path.read_text(encoding="utf-8"))["saves"]) == 2
+
+    respx.reset()
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200, json={"bookmarks": [_bookmark_record("at://x/p/1")]}
+        )
+    )
+    _fetch_mod.fetch_to_inventory(
+        inv_path, handle="user.bsky.social", app_password="app-password",
+        pds_base=PDS_BASE, appview_base=APPVIEW_BASE, mode="keep-lost",
+    )
+    saves = json.loads(inv_path.read_text(encoding="utf-8"))["saves"]
+    assert {s["uri"] for s in saves} == {"at://x/p/1"}
+
+
+@respx.mock
+def test_fetch_to_inventory_keep_all_retains_unsaved_bookmark(tmp_path):
+    """Under keep-all, the gone bookmark is retained and flagged."""
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200, json={"bookmarks": [
+                _bookmark_record("at://x/p/1"),
+                _bookmark_record("at://x/p/2", saved_at="2026-04-13T00:00:00Z"),
+            ]}
+        )
+    )
+    inv_path = tmp_path / "inv.json"
+    _fetch_mod.fetch_to_inventory(
+        inv_path, handle="user.bsky.social", app_password="app-password",
+        pds_base=PDS_BASE, appview_base=APPVIEW_BASE,
+    )
+
+    respx.reset()
+    _mock_create_session()
+    respx.get(f"{PDS_BASE}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200, json={"bookmarks": [_bookmark_record("at://x/p/1")]}
+        )
+    )
+    _fetch_mod.fetch_to_inventory(
+        inv_path, handle="user.bsky.social", app_password="app-password",
+        pds_base=PDS_BASE, appview_base=APPVIEW_BASE, mode="keep-all",
+    )
+    by_uri = {s["uri"]: s for s in json.loads(inv_path.read_text(encoding="utf-8"))["saves"]}
+    assert set(by_uri) == {"at://x/p/1", "at://x/p/2"}
+    assert "removed_detected_at" in by_uri["at://x/p/2"]
 
 
 @respx.mock
