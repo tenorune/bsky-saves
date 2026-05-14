@@ -564,3 +564,46 @@ def test_merge_backward_compat_flagless_prior_upgrades():
     new_entries = [_entry("at://x/1", "2026-04-10T00:00:00Z")]
     merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
     assert merged["saves"][0]["last_seen_at"] == _NOW
+
+
+# ---------- merge_into_inventory: sync active prune (Class 2) ----------
+
+def test_merge_sync_prunes_present_dead_subject():
+    existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": []}
+    new_entries = [
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z", subject_status="not_found"),
+    ]
+    merged = merge_into_inventory(existing, new_entries, mode="sync", now=_NOW)
+    uris = {s["uri"] for s in merged["saves"]}
+    assert uris == {"at://x/1"}
+
+
+def test_merge_keep_lost_retains_present_dead_subject():
+    existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": []}
+    new_entries = [
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z", subject_status="not_found"),
+    ]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    by_uri = {s["uri"]: s for s in merged["saves"]}
+    assert set(by_uri) == {"at://x/1", "at://x/2"}
+    assert by_uri["at://x/2"]["subject_status"] == "not_found"
+
+
+def test_merge_sync_keeps_unknown_subject():
+    existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": []}
+    new_entries = [_entry("at://x/1", "2026-04-10T00:00:00Z", subject_status="unknown")]
+    merged = merge_into_inventory(existing, new_entries, mode="sync", now=_NOW)
+    assert {s["uri"] for s in merged["saves"]} == {"at://x/1"}
+
+
+def test_merge_sync_is_idempotent_on_membership():
+    existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": []}
+    new_entries = [
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z", subject_status="blocked"),
+    ]
+    first = merge_into_inventory(existing, new_entries, mode="sync", now=_NOW)
+    second = merge_into_inventory(first, new_entries, mode="sync", now="2026-05-15T00:00:00Z")
+    assert {s["uri"] for s in first["saves"]} == {s["uri"] for s in second["saves"]} == {"at://x/1"}

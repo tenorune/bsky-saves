@@ -260,8 +260,8 @@ def merge_into_inventory(
     Present entries: field-fill (never overwrite a non-empty existing value;
     lifecycle keys are owned by the flag pass, not the field-fill) plus a
     lifecycle-flag pass. Absent entries (Class 1) are dropped under
-    keep-lost/sync and flagged under keep-all; the sync prune is added in the
-    next task.
+    keep-lost/sync and flagged under keep-all; sync additionally prunes Class 2
+    entries (present bookmarks with a dead subject).
     """
     by_uri: dict[str, dict] = {s["uri"]: dict(s) for s in existing.get("saves", [])}
     fetched_uris = {e["uri"] for e in new_entries if e.get("uri")}
@@ -296,6 +296,14 @@ def merge_into_inventory(
             entry.setdefault("removed_detected_at", now)
         else:  # keep-lost or sync
             del by_uri[uri]
+
+    # sync mode actively prunes Class 2 entries — present bookmarks whose
+    # subject post is known to be gone. "unknown" is not *known* dead, so it
+    # is kept.
+    if mode == "sync":
+        for uri, entry in list(by_uri.items()):
+            if entry.get("subject_status") in ("not_found", "blocked"):
+                del by_uri[uri]
 
     saves = sorted(by_uri.values(), key=lambda s: s.get("saved_at", ""), reverse=True)
     return {
