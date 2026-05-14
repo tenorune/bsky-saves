@@ -257,11 +257,15 @@ def merge_into_inventory(
     the fetch timestamp, written into the lifecycle flags. See the v0.6.0 spec
     section 6.2 for the full algorithm.
 
-    Present entries: field-fill (never overwrite a non-empty existing value;
-    lifecycle keys are owned by the flag pass, not the field-fill) plus a
-    lifecycle-flag pass. Absent entries (Class 1) are dropped under
-    keep-lost/sync and flagged under keep-all; sync additionally prunes Class 2
-    entries (present bookmarks with a dead subject).
+    The algorithm runs in three phases over a single ``by_uri`` accumulator:
+
+    1. Present entries — field-fill (never overwrite a non-empty existing
+       value; lifecycle keys are owned by the flag pass, not the field-fill)
+       plus a lifecycle-flag pass.
+    2. Absent entries (Class 1 — un-saved) — dropped under keep-lost/sync,
+       flagged with ``removed_detected_at`` under keep-all.
+    3. sync only — actively prune Class 2 entries (present bookmarks whose
+       subject post is ``not_found`` / ``blocked``).
     """
     by_uri: dict[str, dict] = {s["uri"]: dict(s) for s in existing.get("saves", [])}
     fetched_uris = {e["uri"] for e in new_entries if e.get("uri")}

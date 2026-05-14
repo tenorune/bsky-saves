@@ -591,6 +591,25 @@ def test_merge_keep_lost_retains_present_dead_subject():
     assert by_uri["at://x/2"]["subject_status"] == "not_found"
 
 
+def test_merge_prior_dead_entry_kept_under_keep_lost_pruned_under_sync():
+    """A prior-inventory entry already flagged not_found, re-fetched as
+    not_found: keep-lost retains it, sync prunes it."""
+    existing = _inv_with(
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z",
+               subject_status="not_found",
+               subject_status_detected_at="2026-05-05T00:00:00Z"),
+    )
+    new_entries = [
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z", subject_status="not_found"),
+    ]
+    kept = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    assert {s["uri"] for s in kept["saves"]} == {"at://x/1", "at://x/2"}
+    pruned = merge_into_inventory(existing, new_entries, mode="sync", now=_NOW)
+    assert {s["uri"] for s in pruned["saves"]} == {"at://x/1"}
+
+
 def test_merge_sync_keeps_unknown_subject():
     existing = {"fetched_at": "2026-05-01T00:00:00Z", "saves": []}
     new_entries = [_entry("at://x/1", "2026-04-10T00:00:00Z", subject_status="unknown")]
