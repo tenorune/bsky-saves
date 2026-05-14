@@ -1,0 +1,20 @@
+{
+  "description": "a prior entry flagged not_found, re-fetched as blocked, transitions subject_status to blocked and re-stamps subject_status_detected_at to now",
+  "mode": "keep-lost",
+  "now": "2026-05-14T12:00:00Z",
+  "prior_inventory": {
+    "fetched_at": "2026-05-01T00:00:00Z",
+    "saves": [
+      {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": [], "last_seen_at": "2026-05-01T00:00:00Z", "subject_status": "not_found", "subject_status_detected_at": "2026-05-05T00:00:00Z"}
+    ]
+  },
+  "fetch_records": [
+    {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "", "embed": null, "author": {"handle": "", "display_name": "", "did": ""}, "images": [], "subject_status": "blocked"}
+  ],
+  "expected_output_inventory": {
+    "fetched_at": "2026-05-01T00:00:00Z",
+    "saves": [
+      {"uri": "at://x/1", "saved_at": "2026-04-10T00:00:00Z", "post_text": "post A", "embed": null, "author": {"handle": "a", "display_name": "A", "did": "did:plc:a"}, "images": [], "last_seen_at": "2026-05-14T12:00:00Z", "subject_status": "blocked", "subject_status_detected_at": "2026-05-14T12:00:00Z"}
+    ]
+  }
+}

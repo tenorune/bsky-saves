@@ -37,6 +37,24 @@ jobs:
           python -m venv /tmp/smoke
           /tmp/smoke/bin/pip install dist/bsky_saves-*-py3-none-any.whl
 
+      - name: Smoke normalise_record subject_status (installed wheel)
+        run: |
+          /tmp/smoke/bin/python - <<'EOF'
+          from bsky_saves.normalize import normalise_record
+          raw = {
+              "createdAt": "2026-04-12T00:00:00Z",
+              "subject": {"uri": "at://x/p/dead"},
+              "item": {
+                  "$type": "app.bsky.feed.defs#notFoundPost",
+                  "uri": "at://x/p/dead",
+                  "notFound": True,
+              },
+          }
+          entry = normalise_record(raw)
+          assert entry["subject_status"] == "not_found", entry
+          print("subject_status wiring OK:", entry["subject_status"])
+          EOF
+
       - name: Start daemon
         run: |
           /tmp/smoke/bin/bsky-saves serve --gui --port 47826 &
