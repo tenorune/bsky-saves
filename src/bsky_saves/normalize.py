@@ -19,19 +19,26 @@ from __future__ import annotations
 def normalise_record(raw: dict) -> dict:
     """Map a raw bookmark record to the inventory schema."""
     embed_view: dict = {}
+    subject_status: str | None = None
     if "item" in raw and isinstance(raw.get("item"), dict):
         # Hydrated `getBookmarks` shape.
         item = raw["item"]
         subject = raw.get("subject", {})
         post_uri = item.get("uri") or subject.get("uri", "")
         saved_at = raw.get("createdAt") or item.get("indexedAt", "")
+        item_type = item.get("$type", "")
+        if item_type == "app.bsky.feed.defs#notFoundPost":
+            subject_status = "not_found"
+        elif item_type == "app.bsky.feed.defs#blockedPost":
+            subject_status = "blocked"
         record = item.get("record", {})
         post_text = record.get("text", "")
         embed_raw = record.get("embed") or {}
         embed_view = item.get("embed") or {}
         author_raw = item.get("author", {})
     else:
-        # Raw `listRecords` shape.
+        # Raw `listRecords` shape — no hydrated post content, no subject state.
+        subject_status = "unknown"
         value = raw.get("value", raw)
         subject = value.get("subject", value)
         post_uri = subject.get("uri") or raw.get("uri", "")
@@ -78,6 +85,8 @@ def normalise_record(raw: dict) -> dict:
         "author": author,
         "images": images,
     }
+    if subject_status is not None:
+        entry["subject_status"] = subject_status
     if quoted_post is not None:
         entry["quoted_post"] = quoted_post
     return entry

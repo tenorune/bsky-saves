@@ -263,3 +263,68 @@ def test_normalise_record_hydrated_getbookmarks_shape():
     assert entry["uri"] == "at://did:plc:author/app.bsky.feed.post/abc"
     assert entry["saved_at"] == "2026-04-22T19:37:34.460Z"
     assert entry["post_text"] == "post body text here"
+
+
+# ---------- normalise_record: subject_status ----------
+
+def test_normalise_record_not_found_post_sets_subject_status():
+    raw = {
+        "createdAt": "2026-04-22T19:37:34Z",
+        "subject": {"uri": "at://author/post1"},
+        "item": {
+            "$type": "app.bsky.feed.defs#notFoundPost",
+            "uri": "at://author/post1",
+            "notFound": True,
+        },
+    }
+    entry = normalise_record(raw)
+    assert entry["subject_status"] == "not_found"
+    assert entry["uri"] == "at://author/post1"
+    assert entry["post_text"] == ""
+    assert entry["author"] == {"handle": "", "display_name": "", "did": ""}
+    assert entry["images"] == []
+
+
+def test_normalise_record_blocked_post_sets_subject_status():
+    raw = {
+        "createdAt": "2026-04-22T19:37:34Z",
+        "subject": {"uri": "at://author/post1"},
+        "item": {
+            "$type": "app.bsky.feed.defs#blockedPost",
+            "uri": "at://author/post1",
+            "blocked": True,
+            "author": {"did": "did:plc:author"},
+        },
+    }
+    entry = normalise_record(raw)
+    assert entry["subject_status"] == "blocked"
+    assert entry["post_text"] == ""
+
+
+def test_normalise_record_live_post_omits_subject_status():
+    raw = {
+        "createdAt": "2026-04-22T19:37:34Z",
+        "subject": {"uri": "at://author/post1"},
+        "item": {
+            "$type": "app.bsky.feed.defs#postView",
+            "uri": "at://author/post1",
+            "author": {"handle": "h", "displayName": "H", "did": "did:plc:h"},
+            "record": {"$type": "app.bsky.feed.post", "text": "live post"},
+        },
+    }
+    entry = normalise_record(raw)
+    assert "subject_status" not in entry
+    assert entry["post_text"] == "live post"
+
+
+def test_normalise_record_listrecords_shape_is_unknown():
+    raw = {
+        "uri": "at://did:plc:me/app.bsky.bookmark/rkey1",
+        "value": {
+            "subject": {"uri": "at://author/post1"},
+            "createdAt": "2026-04-12T00:00:00Z",
+        },
+    }
+    entry = normalise_record(raw)
+    assert entry["subject_status"] == "unknown"
+    assert entry["uri"] == "at://author/post1"
