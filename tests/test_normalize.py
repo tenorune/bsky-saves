@@ -482,3 +482,85 @@ def test_merge_preserves_prior_content_when_subject_dies():
     assert entry["author"]["handle"] == "a"
     assert entry["images"] == [{"kind": "image", "url": "https://cdn/x.jpg", "alt": ""}]
     assert entry["subject_status"] == "not_found"
+
+
+# ---------- merge_into_inventory: absent-entry (Class 1) handling ----------
+
+def _inv_with(*entries):
+    return {"fetched_at": "2026-05-01T00:00:00Z", "saves": list(entries)}
+
+
+def _entry(uri, saved_at, **extra):
+    base = {"uri": uri, "saved_at": saved_at, "post_text": "p",
+            "embed": None, "author": {}, "images": []}
+    base.update(extra)
+    return base
+
+
+def test_merge_keep_lost_drops_absent_entry():
+    existing = _inv_with(
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z"),
+    )
+    new_entries = [_entry("at://x/1", "2026-04-10T00:00:00Z")]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    uris = {s["uri"] for s in merged["saves"]}
+    assert uris == {"at://x/1"}
+
+
+def test_merge_sync_drops_absent_entry():
+    existing = _inv_with(
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z"),
+    )
+    new_entries = [_entry("at://x/1", "2026-04-10T00:00:00Z")]
+    merged = merge_into_inventory(existing, new_entries, mode="sync", now=_NOW)
+    uris = {s["uri"] for s in merged["saves"]}
+    assert uris == {"at://x/1"}
+
+
+def test_merge_keep_all_retains_absent_entry_and_flags_it():
+    existing = _inv_with(
+        _entry("at://x/1", "2026-04-10T00:00:00Z"),
+        _entry("at://x/2", "2026-04-11T00:00:00Z", last_seen_at="2026-05-01T00:00:00Z"),
+    )
+    new_entries = [_entry("at://x/1", "2026-04-10T00:00:00Z")]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-all", now=_NOW)
+    by_uri = {s["uri"]: s for s in merged["saves"]}
+    assert set(by_uri) == {"at://x/1", "at://x/2"}
+    assert by_uri["at://x/2"]["removed_detected_at"] == _NOW
+    # last_seen_at on an absent entry stays at its prior value, not `now`.
+    assert by_uri["at://x/2"]["last_seen_at"] == "2026-05-01T00:00:00Z"
+
+
+def test_merge_keep_all_does_not_restamp_existing_removed_detected_at():
+    existing = _inv_with(
+        _entry("at://x/2", "2026-04-11T00:00:00Z",
+               removed_detected_at="2026-05-09T00:00:00Z"),
+    )
+    merged = merge_into_inventory(existing, [], mode="keep-all", now=_NOW)
+    assert merged["saves"][0]["removed_detected_at"] == "2026-05-09T00:00:00Z"
+
+
+def test_merge_keep_all_class1_masks_class2():
+    # An entry whose post died (Class 2 — subject_status set) and which the
+    # user then un-saved (Class 1 — now absent) carries BOTH flags under
+    # keep-all. The absent-entry path does not touch subject_status.
+    existing = _inv_with(
+        _entry("at://x/2", "2026-04-11T00:00:00Z",
+               subject_status="not_found",
+               subject_status_detected_at="2026-05-05T00:00:00Z"),
+    )
+    merged = merge_into_inventory(existing, [], mode="keep-all", now=_NOW)
+    entry = merged["saves"][0]
+    assert entry["removed_detected_at"] == _NOW
+    assert entry["subject_status"] == "not_found"
+    assert entry["subject_status_detected_at"] == "2026-05-05T00:00:00Z"
+
+
+def test_merge_backward_compat_flagless_prior_upgrades():
+    # A pre-0.6.0 inventory entry has none of the four flag fields.
+    existing = _inv_with(_entry("at://x/1", "2026-04-10T00:00:00Z"))
+    new_entries = [_entry("at://x/1", "2026-04-10T00:00:00Z")]
+    merged = merge_into_inventory(existing, new_entries, mode="keep-lost", now=_NOW)
+    assert merged["saves"][0]["last_seen_at"] == _NOW

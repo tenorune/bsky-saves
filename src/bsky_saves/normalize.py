@@ -259,8 +259,9 @@ def merge_into_inventory(
 
     Present entries: field-fill (never overwrite a non-empty existing value;
     lifecycle keys are owned by the flag pass, not the field-fill) plus a
-    lifecycle-flag pass. Absent entries (Class 1) and the sync prune are added
-    in later tasks.
+    lifecycle-flag pass. Absent entries (Class 1) are dropped under
+    keep-lost/sync and flagged under keep-all; the sync prune is added in the
+    next task.
     """
     by_uri: dict[str, dict] = {s["uri"]: dict(s) for s in existing.get("saves", [])}
     fetched_uris = {e["uri"] for e in new_entries if e.get("uri")}
@@ -286,6 +287,15 @@ def merge_into_inventory(
         working["last_seen_at"] = now
         working.pop("removed_detected_at", None)
         _reconcile_subject_status(working, prior_snapshot, entry, now)
+
+    # Absent entries (Class 1 — the user un-saved them).
+    for uri, entry in list(by_uri.items()):
+        if uri in fetched_uris:
+            continue
+        if mode == "keep-all":
+            entry.setdefault("removed_detected_at", now)
+        else:  # keep-lost or sync
+            del by_uri[uri]
 
     saves = sorted(by_uri.values(), key=lambda s: s.get("saved_at", ""), reverse=True)
     return {
