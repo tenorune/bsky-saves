@@ -19,19 +19,28 @@ from __future__ import annotations
 def normalise_record(raw: dict) -> dict:
     """Map a raw bookmark record to the inventory schema."""
     embed_view: dict = {}
+    subject_status: str | None = None
     if "item" in raw and isinstance(raw.get("item"), dict):
         # Hydrated `getBookmarks` shape.
         item = raw["item"]
         subject = raw.get("subject", {})
         post_uri = item.get("uri") or subject.get("uri", "")
         saved_at = raw.get("createdAt") or item.get("indexedAt", "")
+        item_type = item.get("$type", "")
+        # Any other $type — a postView, an absent $type, or a future union
+        # member we don't recognise — is treated as live: no subject_status.
+        if item_type == "app.bsky.feed.defs#notFoundPost":
+            subject_status = "not_found"
+        elif item_type == "app.bsky.feed.defs#blockedPost":
+            subject_status = "blocked"
         record = item.get("record", {})
         post_text = record.get("text", "")
         embed_raw = record.get("embed") or {}
         embed_view = item.get("embed") or {}
         author_raw = item.get("author", {})
     else:
-        # Raw `listRecords` shape.
+        # Raw `listRecords` shape — no hydrated post content, no subject state.
+        subject_status = "unknown"
         value = raw.get("value", raw)
         subject = value.get("subject", value)
         post_uri = subject.get("uri") or raw.get("uri", "")
@@ -78,6 +87,8 @@ def normalise_record(raw: dict) -> dict:
         "author": author,
         "images": images,
     }
+    if subject_status is not None:
+        entry["subject_status"] = subject_status
     if quoted_post is not None:
         entry["quoted_post"] = quoted_post
     return entry
@@ -188,32 +199,116 @@ def extract_quoted_post(view: dict) -> dict | None:
     }
 
 
-def merge_into_inventory(existing: dict, new_entries: list[dict]) -> dict:
-    """Merge new_entries into existing inventory.
+_LIFECYCLE_KEYS = frozenset(
+    {"subject_status", "subject_status_detected_at", "last_seen_at", "removed_detected_at"}
+)
 
-    Rules:
-    - Keyed by ``uri``.
-    - For URIs already in the inventory: ADD missing fields from the new
-      entry, but never overwrite a non-empty existing value. Preserves
-      hydration fields written by other commands (article_text,
-      thread_replies, etc.).
-    - For new URIs: append the entry as-is.
-    - Result sorted by ``saved_at`` desc (newest first).
-    - ``fetched_at`` updated by the caller.
+
+def _reconcile_subject_status(
+    working: dict, prior: dict | None, fresh: dict, now: str
+) -> None:
+    """Reconcile subject_status / subject_status_detected_at on `working`.
+
+    `prior` is the entry as it stood before this merge (or None for a
+    brand-new URI); `fresh` is the newly-fetched normalised record. `working`
+    is mutated in place. See the v0.6.0 spec section 6.2.
+    """
+    fresh_status = fresh.get("subject_status")
+    prior_status = prior.get("subject_status") if prior is not None else None
+    prior_detected = (
+        prior.get("subject_status_detected_at") if prior is not None else None
+    )
+
+    working.pop("subject_status", None)
+    working.pop("subject_status_detected_at", None)
+
+    if fresh_status is None:
+        # Live observation — both fields stay cleared.
+        return
+    if fresh_status in ("not_found", "blocked"):
+        working["subject_status"] = fresh_status
+        if prior_status == fresh_status and prior_detected is not None:
+            working["subject_status_detected_at"] = prior_detected
+        else:
+            working["subject_status_detected_at"] = now
+        return
+    # fresh_status == "unknown": never overwrites, weakens, or clears an
+    # existing entry; stored only for a brand-new URI; never sets the
+    # timestamp.
+    if prior is None:
+        working["subject_status"] = "unknown"
+    else:
+        if prior_status is not None:
+            working["subject_status"] = prior_status
+        if prior_detected is not None:
+            working["subject_status_detected_at"] = prior_detected
+
+
+def merge_into_inventory(
+    existing: dict,
+    new_entries: list[dict],
+    *,
+    mode: str = "keep-lost",
+    now: str,
+) -> dict:
+    """Merge new_entries into existing inventory under a retention mode.
+
+    ``mode`` is one of "sync", "keep-lost" (default), "keep-all". ``now`` is
+    the fetch timestamp, written into the lifecycle flags. See the v0.6.0 spec
+    section 6.2 for the full algorithm.
+
+    The algorithm runs in three phases over a single ``by_uri`` accumulator:
+
+    1. Present entries — field-fill (never overwrite a non-empty existing
+       value; lifecycle keys are owned by the flag pass, not the field-fill)
+       plus a lifecycle-flag pass.
+    2. Absent entries (Class 1 — un-saved) — dropped under keep-lost/sync,
+       flagged with ``removed_detected_at`` under keep-all.
+    3. sync only — actively prune Class 2 entries (present bookmarks whose
+       subject post is ``not_found`` / ``blocked``).
     """
     by_uri: dict[str, dict] = {s["uri"]: dict(s) for s in existing.get("saves", [])}
+    fetched_uris = {e["uri"] for e in new_entries if e.get("uri")}
+
     for entry in new_entries:
         uri = entry.get("uri", "")
         if not uri:
             continue
-        if uri in by_uri:
-            existing_entry = by_uri[uri]
+        prior = by_uri.get(uri)
+        if prior is not None:
+            prior_snapshot = dict(prior)
+            working = prior
             for k, v in entry.items():
-                cur = existing_entry.get(k)
+                if k in _LIFECYCLE_KEYS:
+                    continue
+                cur = working.get(k)
                 if cur in (None, "", [], {}):
-                    existing_entry[k] = v
+                    working[k] = v
         else:
-            by_uri[uri] = dict(entry)
+            prior_snapshot = None
+            working = dict(entry)
+            by_uri[uri] = working
+        working["last_seen_at"] = now
+        working.pop("removed_detected_at", None)
+        _reconcile_subject_status(working, prior_snapshot, entry, now)
+
+    # Absent entries (Class 1 — the user un-saved them).
+    for uri, entry in list(by_uri.items()):
+        if uri in fetched_uris:
+            continue
+        if mode == "keep-all":
+            entry.setdefault("removed_detected_at", now)
+        else:  # keep-lost or sync
+            del by_uri[uri]
+
+    # sync mode actively prunes Class 2 entries — present bookmarks whose
+    # subject post is known to be gone. "unknown" is not *known* dead, so it
+    # is kept.
+    if mode == "sync":
+        for uri, entry in list(by_uri.items()):
+            if entry.get("subject_status") in ("not_found", "blocked"):
+                del by_uri[uri]
+
     saves = sorted(by_uri.values(), key=lambda s: s.get("saved_at", ""), reverse=True)
     return {
         "fetched_at": existing.get("fetched_at"),

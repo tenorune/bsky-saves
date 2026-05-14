@@ -696,6 +696,41 @@ def test_fetch_response_shape_matches_normalise_record():
     assert entry["author"]["did"] == "did:plc:x"
 
 
+@respx.mock
+def test_fetch_propagates_subject_status_for_dead_post():
+    """A bookmark whose item is a notFoundPost comes back with
+    subject_status == 'not_found' in the /fetch response."""
+    _mock_fetch_create_session()
+    respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "bookmarks": [
+                    {
+                        "subject": {"uri": "at://x/p/dead"},
+                        "createdAt": "2026-04-12T18:31:00Z",
+                        "item": {
+                            "$type": "app.bsky.feed.defs#notFoundPost",
+                            "uri": "at://x/p/dead",
+                            "notFound": True,
+                        },
+                    }
+                ]
+            },
+        )
+    )
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port,
+            "/fetch",
+            method="POST",
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
+        )
+    assert status == 200
+    entry = json.loads(body)["saves"][0]
+    assert entry["subject_status"] == "not_found"
+
+
 def test_fetch_invalid_cursor_returns_400():
     with serve_in_background() as (port, _):
         status, _, body = _request(

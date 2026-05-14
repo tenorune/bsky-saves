@@ -66,6 +66,37 @@ def _build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("BSKY_APPVIEW", "https://bsky.social"),
         help="AppView base URL for fallback endpoints (default: $BSKY_APPVIEW or https://bsky.social).",
     )
+    fetch_mode_group = p_fetch.add_mutually_exclusive_group()
+    fetch_mode_group.add_argument(
+        "--mode",
+        choices=["sync", "keep-lost", "keep-all"],
+        dest="mode",
+        help=(
+            "Inventory retention policy (default: keep-lost). "
+            "sync: mirror only what is live on the server. "
+            "keep-lost: also keep posts removed outside your control. "
+            "keep-all: also keep bookmarks you deliberately un-saved."
+        ),
+    )
+    fetch_mode_group.add_argument(
+        "--sync",
+        action="store_const",
+        const="sync",
+        dest="mode",
+        help="Alias for --mode sync.",
+    )
+    fetch_mode_group.add_argument(
+        "--keep-all",
+        action="store_const",
+        const="keep-all",
+        dest="mode",
+        help="Alias for --mode keep-all.",
+    )
+    # NOTE: argparse MEG enforcement is bypassed when one arg specifies the
+    # default value explicitly (e.g. --sync --mode keep-lost). This is a
+    # known argparse limitation with store_const + set_defaults on a shared
+    # dest; the last-given value wins silently in that narrow case.
+    p_fetch.set_defaults(mode="keep-lost")
 
     p_hydrate = sub.add_parser("hydrate", help="Hydrate inventory entries.")
     hsub = p_hydrate.add_subparsers(dest="hydrate_what", required=True)
@@ -168,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
             app_password=app_password,
             pds_base=args.pds,
             appview_base=args.appview,
+            mode=args.mode,
         )
         return 0
 

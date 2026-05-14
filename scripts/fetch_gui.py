@@ -10,11 +10,15 @@ import io
 import shutil
 import sys
 import tarfile
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11 — tomllib entered stdlib in 3.11
+    import tomli as tomllib
 
 
 class GuiFetchError(Exception):

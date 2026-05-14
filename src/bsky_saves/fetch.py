@@ -299,9 +299,14 @@ def fetch_to_inventory(
     pds_base: str = "https://bsky.social",
     appview_base: str = "https://bsky.social",
     appview_did_candidates: list[str] | None = None,
+    mode: str = "keep-lost",
 ) -> int:
     """High-level: authenticate, probe, normalise, merge into inventory file.
     Returns the number of saves in the resulting inventory.
+
+    ``mode`` ("sync" | "keep-lost" | "keep-all", default "keep-lost") is
+    forwarded to ``merge_into_inventory`` to select the retention policy;
+    see the v0.6.0 spec section 6.2.
     """
     print(f"bsky-saves: authenticating as {handle}", file=sys.stderr)
     session = create_session(pds_base, handle, app_password)
@@ -338,10 +343,11 @@ def fetch_to_inventory(
         existing = {"fetched_at": None, "saves": []}
     else:
         existing = json.loads(inventory_path.read_text(encoding="utf-8"))
-    merged = merge_into_inventory(existing, new_entries)
+    now = _now_iso()
+    merged = merge_into_inventory(existing, new_entries, mode=mode, now=now)
 
     if first_run or merged["saves"] != existing["saves"]:
-        merged["fetched_at"] = _now_iso()
+        merged["fetched_at"] = now
         inventory_path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_inventory(inventory_path, merged)
     print(
