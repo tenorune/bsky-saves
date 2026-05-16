@@ -15,6 +15,10 @@ Subcommands:
 
   bsky-saves serve [--port PORT] [--allow-origin ORIGIN]... [--verbose]
       Run a local HTTP helper daemon for bsky-saves-gui (CORS bridge).
+
+  bsky-saves token [--rotate]
+      Print (or rotate) the session token used by bsky-saves-gui to pair
+      with the local helper daemon.
 """
 from __future__ import annotations
 
@@ -253,7 +257,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "token":
         from ._io import config_dir, read_or_create_token, _TOKEN_BYTES
         import base64
-        import os as _os
         import secrets
 
         if args.rotate:
@@ -262,12 +265,12 @@ def main(argv: list[str] | None = None) -> int:
             fresh = base64.urlsafe_b64encode(secrets.token_bytes(_TOKEN_BYTES)).rstrip(b"=").decode("ascii")
             path = cdir / "token"
             tmp = path.with_suffix(".tmp")
-            fd = _os.open(str(tmp), _os.O_CREAT | _os.O_TRUNC | _os.O_WRONLY, 0o600)
+            fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
             try:
-                _os.write(fd, (fresh + "\n").encode("ascii"))
+                os.write(fd, (fresh + "\n").encode("ascii"))
             finally:
-                _os.close(fd)
-            _os.replace(tmp, path)
+                os.close(fd)
+            os.replace(tmp, path)
             print(fresh)
             return 0
 
