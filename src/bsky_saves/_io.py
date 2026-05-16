@@ -1,9 +1,72 @@
-"""Low-level inventory I/O helpers shared by every write callsite."""
+"""Low-level I/O helpers: inventory writes and session-token management."""
 from __future__ import annotations
 
+import base64
 import json
 import os
+import secrets
+import sys
 from pathlib import Path
+
+_TOKEN_BYTES = 32
+
+
+def config_dir() -> Path:
+    """Return the platform-conventional bsky-saves config directory.
+
+    - Linux/*BSD: $XDG_CONFIG_HOME/bsky-saves or ~/.config/bsky-saves
+    - macOS:      ~/Library/Application Support/bsky-saves
+    - Windows:    %APPDATA%\\bsky-saves
+
+    The directory is NOT created by this function; callers that need to
+    write should mkdir(parents=True, exist_ok=True) themselves.
+    """
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "bsky-saves"
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        if appdata:
+            return Path(appdata) / "bsky-saves"
+        return Path.home() / "AppData" / "Roaming" / "bsky-saves"
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    if xdg:
+        return Path(xdg) / "bsky-saves"
+    return Path.home() / ".config" / "bsky-saves"
+
+
+def read_or_create_token() -> str:
+    """Return the on-disk session token, lazy-generating if absent.
+
+    Format: 32 random bytes, base64url-encoded without padding (~43 chars).
+    Location: <config_dir>/token. File perms: 0o600. Atomic-write via temp
+    file + os.replace. Returns the first non-empty line of the file, stripped.
+
+    If two bsky-saves processes race to lazy-create, both succeed at writing
+    a token to the temp file (last-writer-wins on the temp file body); the
+    second os.replace then overwrites the first. Both tokens are valid 0o600
+    files; the second-replaced value sticks. A token.tmp file left over from
+    a crashed prior write is recovered by truncate-on-next-open, not blocking
+    future creation.
+    """
+    cdir = config_dir()
+    path = cdir / "token"
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped:
+                return stripped
+        # Empty file → fall through and regenerate.
+
+    cdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fresh = base64.urlsafe_b64encode(secrets.token_bytes(_TOKEN_BYTES)).rstrip(b"=").decode("ascii")
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    try:
+        os.write(fd, (fresh + "\n").encode("ascii"))
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+    return fresh
 
 
 def atomic_write_inventory(path: Path, inv: dict) -> None:

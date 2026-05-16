@@ -15,6 +15,10 @@ Subcommands:
 
   bsky-saves serve [--port PORT] [--allow-origin ORIGIN]... [--verbose]
       Run a local HTTP helper daemon for bsky-saves-gui (CORS bridge).
+
+  bsky-saves token [--rotate]
+      Print (or rotate) the session token used by bsky-saves-gui to pair
+      with the local helper daemon.
 """
 from __future__ import annotations
 
@@ -176,6 +180,16 @@ def _build_parser() -> argparse.ArgumentParser:
              "scripts/fetch_gui.py).",
     )
 
+    p_token = sub.add_parser(
+        "token",
+        help="Print the session token used by bsky-saves-gui to pair with this helper.",
+    )
+    p_token.add_argument(
+        "--rotate",
+        action="store_true",
+        help="Generate a fresh token, invalidating any paired GUI sessions.",
+    )
+
     return parser
 
 
@@ -239,6 +253,29 @@ def main(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
             gui=args.gui,
         )
+
+    if args.cmd == "token":
+        from ._io import config_dir, read_or_create_token, _TOKEN_BYTES
+        import base64
+        import secrets
+
+        if args.rotate:
+            cdir = config_dir()
+            cdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fresh = base64.urlsafe_b64encode(secrets.token_bytes(_TOKEN_BYTES)).rstrip(b"=").decode("ascii")
+            path = cdir / "token"
+            tmp = path.with_suffix(".tmp")
+            fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+            try:
+                os.write(fd, (fresh + "\n").encode("ascii"))
+            finally:
+                os.close(fd)
+            os.replace(tmp, path)
+            print(fresh)
+            return 0
+
+        print(read_or_create_token())
+        return 0
 
     return 2
 

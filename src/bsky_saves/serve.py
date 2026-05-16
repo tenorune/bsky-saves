@@ -12,6 +12,7 @@ https://github.com/tenorune/bsky-saves-gui/blob/main/docs/bsky-saves-serve-requi
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ import httpx
 from . import __version__
 from .articles import _extract_article
 from .auth import create_session, refresh_session
+from ._io import read_or_create_token
 from ._net import UnsafeURLError, assert_public_http_url, safe_http_get
 from .fetch import (
     ENDPOINT_IDS,
@@ -47,6 +49,25 @@ from .tid import rkey_of, decode_tid_to_iso
 _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB uniform cap on every POST body.
 _BODY_REJECTED: object = object()    # Sentinel for "413 already sent."
 
+# Bump rules: docs/protocol-versioning.md
+_PROTOCOL_VERSION = "2"
+
+def _bundled_gui_version() -> str | None:
+    """Return the version of the bsky-saves-gui bundle vendored into this
+    wheel, or None when no bundle is present (dev install without the
+    build-time fetch_gui hook having run). The marker file is written by
+    scripts/fetch_gui.py post-extraction in a `{version}\\n{sha256}\\n`
+    format; we return just the first line.
+    """
+    from ._gui_serve import _gui_root_path
+    marker = _gui_root_path() / ".gui-version"
+    try:
+        text = marker.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    first = text.splitlines()[0].strip() if text else ""
+    return first or None
+
 
 def _handle_ping(handler) -> None:
     handler._send_json(
@@ -54,6 +75,8 @@ def _handle_ping(handler) -> None:
         {
             "name": "bsky-saves",
             "version": __version__,
+            "protocol": _PROTOCOL_VERSION,
+            "gui_bundled": _bundled_gui_version(),
             "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "jwt-credentials"],
         },
     )
@@ -413,6 +436,13 @@ ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("POST", "/hydrate-threads"): _handle_hydrate_threads,
 }
 
+# Routes that bypass token authentication. /ping is the pre-pairing
+# diagnostic surface (probeHelper reads it before the GUI has any
+# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md §5.
+EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/ping"),
+})
+
 
 class _HandlerLike:
     """Type stub for request handlers. The real type is the class returned by
@@ -569,7 +599,7 @@ def make_handler(
             if origin and origin in origins:
                 self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
             self.send_header("Access-Control-Max-Age", "600")
 
         def _security_headers(self) -> None:
@@ -633,13 +663,16 @@ def make_handler(
             return parsed if isinstance(parsed, dict) else None
 
         def _security_gate(self, method: str) -> bool:
-            """Validate Host and Origin. Returns True if the request may
-            proceed to _dispatch; returns False after sending a rejection
-            response. Called from every do_* entrypoint before route handling.
+            """Validate Host, Origin, and session token. Returns True if the
+            request may proceed to _dispatch; returns False after sending a
+            rejection response. Called from every do_* entrypoint before
+            route handling.
             """
             if not self._check_host():
                 return False
             if not self._check_origin():
+                return False
+            if not self._check_token(method):
                 return False
             return True
 
@@ -661,6 +694,39 @@ def make_handler(
                 return True
             if origin not in origins:
                 self._send_json_error(403, "Origin not allowed")
+                return False
+            return True
+
+        def _check_token(self, method: str) -> bool:
+            """Reject requests missing or carrying a wrong session token.
+            EXEMPT_ROUTES bypass; OPTIONS preflight always bypasses (CORS
+            requires preflight to succeed before custom headers can be
+            sent). Static-file requests (gui_root is not None, method is
+            GET/HEAD, path is not in ROUTES) also bypass — the GUI loads
+            index.html before it can read the meta tag, and static assets
+            contain no user data."""
+            if method == "OPTIONS":
+                return True
+            if (method, self.path) in EXEMPT_ROUTES:
+                return True
+            # Static-file branch: GET/HEAD requests to non-API paths in
+            # --gui mode are served from disk without auth.
+            if (
+                gui is not None
+                and method in ("GET", "HEAD")
+                and (method, self.path) not in ROUTES
+            ):
+                return True
+
+            header = self.headers.get("Authorization", "")
+            prefix = "Bearer "
+            if not header.startswith(prefix):
+                self._send_json_error(401, "authentication required")
+                return False
+            presented = header[len(prefix):]
+            expected = read_or_create_token()
+            if not hmac.compare_digest(presented, expected):
+                self._send_json_error(401, "authentication required")
                 return False
             return True
 
