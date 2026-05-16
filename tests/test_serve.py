@@ -78,16 +78,42 @@ def _request(port, path, *, method="GET", headers=None, body=None):
         return e.code, dict(e.headers), e.read()
 
 
-def test_unknown_path_returns_404():
+TEST_TOKEN = "test-session-token-please-ignore-aaaaaaaaaaa"
+
+
+@pytest.fixture
+def paired_helper(monkeypatch, tmp_path):
+    """Configure the helper to use a known test token. Yields the token
+    string so tests can include it in Authorization headers.
+
+    Monkeypatches _io.config_dir to a per-test temp dir and writes the
+    token there. After test teardown, monkeypatch reverts both.
+    """
+    cdir = tmp_path / "bsky-saves"
+    cdir.mkdir(parents=True, exist_ok=True)
+    (cdir / "token").write_text(TEST_TOKEN + "\n", encoding="utf-8")
+    monkeypatch.setattr("bsky_saves._io.config_dir", lambda: cdir)
+    yield TEST_TOKEN
+
+
+def _auth_headers(token: str, extra: dict | None = None) -> dict:
+    """Build a request headers dict that includes the paired Authorization."""
+    headers = {"Authorization": f"Bearer {token}"}
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def test_unknown_path_returns_404(paired_helper):
     with serve_in_background() as (port, _):
-        status, _, body = _request(port, "/admin")
+        status, _, body = _request(port, "/admin", headers=_auth_headers(paired_helper))
     assert status == 404
     assert json.loads(body) == {"error": "not found"}
 
 
-def test_unknown_method_returns_404():
+def test_unknown_method_returns_404(paired_helper):
     with serve_in_background() as (port, _):
-        status, _, body = _request(port, "/ping", method="DELETE")
+        status, _, body = _request(port, "/ping", method="DELETE", headers=_auth_headers(paired_helper))
     assert status == 404
     assert json.loads(body) == {"error": "not found"}
 
@@ -108,7 +134,7 @@ def test_ping_returns_full_shape(monkeypatch):
     assert payload == {
         "name": "bsky-saves",
         "version": __version__,
-        "protocol": "1",
+        "protocol": "2",
         "gui_bundled": None,
         "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "jwt-credentials"],
     }
@@ -188,11 +214,12 @@ def test_cors_no_origin_header_request_succeeds():
     assert payload["name"] == "bsky-saves"
 
 
-def test_cors_404_response_still_carries_cors_headers():
+def test_cors_404_response_still_carries_cors_headers(paired_helper):
     """Error responses must also include CORS headers so browsers can read them."""
     with serve_in_background() as (port, _):
         status, headers, _ = _request(
-            port, "/admin", headers={"Origin": DEFAULT_ORIGIN}
+            port, "/admin",
+            headers=_auth_headers(paired_helper, {"Origin": DEFAULT_ORIGIN}),
         )
     assert status == 404
     assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
@@ -204,7 +231,7 @@ from bsky_saves.images import DEFAULT_USER_AGENT as _IMAGES_UA  # noqa: F401
 
 
 @respx.mock
-def test_fetch_image_happy_path():
+def test_fetch_image_happy_path(paired_helper):
     respx.get("https://cdn.bsky.app/img/x.jpg").respond(
         200, content=b"BYTES", headers={"Content-Type": "image/jpeg"}
     )
@@ -213,6 +240,7 @@ def test_fetch_image_happy_path():
             port,
             "/fetch-image",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://cdn.bsky.app/img/x.jpg"},
         )
     assert status == 200
@@ -221,7 +249,7 @@ def test_fetch_image_happy_path():
 
 
 @respx.mock
-def test_fetch_image_subdomain_wildcard_allowed():
+def test_fetch_image_subdomain_wildcard_allowed(paired_helper):
     respx.get("https://video.bsky.app/v.jpg").respond(
         200, content=b"V", headers={"Content-Type": "image/jpeg"}
     )
@@ -230,66 +258,73 @@ def test_fetch_image_subdomain_wildcard_allowed():
             port,
             "/fetch-image",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://video.bsky.app/v.jpg"},
         )
     assert status == 200
     assert body == b"V"
 
 
-def test_fetch_image_bare_bsky_app_rejected():
+def test_fetch_image_bare_bsky_app_rejected(paired_helper):
     """Hostname is exactly 'bsky.app' — no leading dot, so subdomain rule doesn't match."""
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/fetch-image",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://bsky.app/img/x.jpg"},
         )
     assert status == 400
     assert json.loads(body) == {"error": "url not allowed"}
 
 
-def test_fetch_image_lookalike_domain_rejected():
+def test_fetch_image_lookalike_domain_rejected(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/fetch-image",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://bskyapp.com/img/x.jpg"},
         )
     assert status == 400
     assert json.loads(body) == {"error": "url not allowed"}
 
 
-def test_fetch_image_http_scheme_rejected():
+def test_fetch_image_http_scheme_rejected(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/fetch-image",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "http://cdn.bsky.app/img/x.jpg"},
         )
     assert status == 400
     assert json.loads(body) == {"error": "url not allowed"}
 
 
-def test_fetch_image_missing_url_rejected():
+def test_fetch_image_missing_url_rejected(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
-            port, "/fetch-image", method="POST", body={"not_url": "x"}
+            port, "/fetch-image", method="POST",
+            headers=_auth_headers(paired_helper),
+            body={"not_url": "x"},
         )
     assert status == 400
     assert json.loads(body) == {"error": "missing url"}
 
 
 @respx.mock
-def test_fetch_image_upstream_4xx_passed_through():
+def test_fetch_image_upstream_4xx_passed_through(paired_helper):
     respx.get("https://cdn.bsky.app/img/missing.jpg").respond(404)
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/fetch-image",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://cdn.bsky.app/img/missing.jpg"},
         )
     assert status == 404
@@ -297,7 +332,7 @@ def test_fetch_image_upstream_4xx_passed_through():
 
 
 @respx.mock
-def test_fetch_image_network_error_returns_502():
+def test_fetch_image_network_error_returns_502(paired_helper):
     import httpx
     respx.get("https://cdn.bsky.app/img/down.jpg").mock(
         side_effect=httpx.ConnectError("nope")
@@ -307,6 +342,7 @@ def test_fetch_image_network_error_returns_502():
             port,
             "/fetch-image",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://cdn.bsky.app/img/down.jpg"},
         )
     assert status == 502
@@ -315,7 +351,7 @@ def test_fetch_image_network_error_returns_502():
 
 
 @respx.mock
-def test_extract_article_happy_path():
+def test_extract_article_happy_path(paired_helper):
     html = (
         "<html><head><title>Hello</title></head><body><article>"
         + ("Body text. " * 30)
@@ -327,6 +363,7 @@ def test_extract_article_happy_path():
             port,
             "/extract-article",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://example.com/a"},
         )
     assert status == 200
@@ -340,7 +377,7 @@ def test_extract_article_happy_path():
 
 
 @respx.mock
-def test_extract_article_empty_body_returns_200_with_note():
+def test_extract_article_empty_body_returns_200_with_note(paired_helper):
     html = "<html><body><article>too short</article></body></html>"
     respx.get("https://example.com/short").respond(200, html=html)
     with serve_in_background() as (port, _):
@@ -348,6 +385,7 @@ def test_extract_article_empty_body_returns_200_with_note():
             port,
             "/extract-article",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://example.com/short"},
         )
     assert status == 200
@@ -358,35 +396,39 @@ def test_extract_article_empty_body_returns_200_with_note():
     assert "fetched_at" in payload
 
 
-def test_extract_article_disallowed_scheme():
+def test_extract_article_disallowed_scheme(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/extract-article",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "file:///etc/passwd"},
         )
     assert status == 400
     assert json.loads(body) == {"error": "url scheme not allowed"}
 
 
-def test_extract_article_missing_url():
+def test_extract_article_missing_url(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
-            port, "/extract-article", method="POST", body={"not_url": "x"}
+            port, "/extract-article", method="POST",
+            headers=_auth_headers(paired_helper),
+            body={"not_url": "x"},
         )
     assert status == 400
     assert json.loads(body) == {"error": "missing url"}
 
 
 @respx.mock
-def test_extract_article_upstream_5xx_passed_through():
+def test_extract_article_upstream_5xx_passed_through(paired_helper):
     respx.get("https://example.com/down").respond(503)
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/extract-article",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://example.com/down"},
         )
     assert status == 503
@@ -394,7 +436,7 @@ def test_extract_article_upstream_5xx_passed_through():
 
 
 @respx.mock
-def test_extract_article_network_error_returns_502():
+def test_extract_article_network_error_returns_502(paired_helper):
     import httpx
     respx.get("https://example.com/x").mock(
         side_effect=httpx.ConnectError("dns"),
@@ -404,6 +446,7 @@ def test_extract_article_network_error_returns_502():
             port,
             "/extract-article",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"url": "https://example.com/x"},
         )
     assert status == 502
@@ -649,7 +692,7 @@ def _bookmark_record_for_fetch(uri: str, saved_at: str = "2026-04-12T18:31:00Z")
 
 
 @respx.mock
-def test_fetch_first_page_probes_and_returns_cursor():
+def test_fetch_first_page_probes_and_returns_cursor(paired_helper):
     _mock_fetch_create_session()
     respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
         return_value=httpx.Response(
@@ -665,6 +708,7 @@ def test_fetch_first_page_probes_and_returns_cursor():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
         )
     assert status == 200
@@ -678,7 +722,7 @@ def test_fetch_first_page_probes_and_returns_cursor():
 
 
 @respx.mock
-def test_fetch_continuation_skips_probe_via_cursor():
+def test_fetch_continuation_skips_probe_via_cursor(paired_helper):
     """Continuation cursor names a specific endpoint; daemon calls only that one."""
     _mock_fetch_create_session()
     pds_route = respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
@@ -696,6 +740,7 @@ def test_fetch_continuation_skips_probe_via_cursor():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
                 "cursor": cursor,
@@ -707,7 +752,7 @@ def test_fetch_continuation_skips_probe_via_cursor():
 
 
 @respx.mock
-def test_fetch_response_shape_matches_normalise_record():
+def test_fetch_response_shape_matches_normalise_record(paired_helper):
     """Each saves[] entry has the exact field set produced by normalise_record."""
     _mock_fetch_create_session()
     respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
@@ -721,6 +766,7 @@ def test_fetch_response_shape_matches_normalise_record():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
         )
     assert status == 200
@@ -732,7 +778,7 @@ def test_fetch_response_shape_matches_normalise_record():
 
 
 @respx.mock
-def test_fetch_propagates_subject_status_for_dead_post():
+def test_fetch_propagates_subject_status_for_dead_post(paired_helper):
     """A bookmark whose item is a notFoundPost comes back with
     subject_status == 'not_found' in the /fetch response."""
     _mock_fetch_create_session()
@@ -759,6 +805,7 @@ def test_fetch_propagates_subject_status_for_dead_post():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
         )
     assert status == 200
@@ -766,12 +813,13 @@ def test_fetch_propagates_subject_status_for_dead_post():
     assert entry["subject_status"] == "not_found"
 
 
-def test_fetch_invalid_cursor_returns_400():
+def test_fetch_invalid_cursor_returns_400(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
                 "cursor": "not-a-valid-base64-cursor!!!",
@@ -781,15 +829,16 @@ def test_fetch_invalid_cursor_returns_400():
     assert json.loads(body) == {"error": "invalid cursor"}
 
 
-def test_fetch_missing_credentials_returns_400():
+def test_fetch_missing_credentials_returns_400(paired_helper):
     with serve_in_background() as (port, _):
-        status, _, body = _request(port, "/fetch", method="POST", body={})
+        status, _, body = _request(port, "/fetch", method="POST",
+                                   headers=_auth_headers(paired_helper), body={})
     assert status == 400
     assert json.loads(body) == {"error": "missing credentials"}
 
 
 @respx.mock
-def test_fetch_pds_defaults_to_bsky_social_when_omitted():
+def test_fetch_pds_defaults_to_bsky_social_when_omitted(paired_helper):
     """Credentials without `pds` → daemon calls createSession against bsky.social."""
     create_session_route = respx.post(
         f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
@@ -807,6 +856,7 @@ def test_fetch_pds_defaults_to_bsky_social_when_omitted():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
         )
     assert status == 200
@@ -814,7 +864,7 @@ def test_fetch_pds_defaults_to_bsky_social_when_omitted():
 
 
 @respx.mock
-def test_fetch_createsession_failure_returns_401():
+def test_fetch_createsession_failure_returns_401(paired_helper):
     respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession").mock(
         return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
     )
@@ -823,6 +873,7 @@ def test_fetch_createsession_failure_returns_401():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social", "app_password": "wrong"}},
         )
     assert status == 401
@@ -832,7 +883,7 @@ def test_fetch_createsession_failure_returns_401():
 
 
 @respx.mock
-def test_fetch_silent_fallback_on_endpoint_failure():
+def test_fetch_silent_fallback_on_endpoint_failure(paired_helper):
     """Continuation with a wrapped cursor whose named endpoint returns 5xx →
     daemon re-probes (cursor dropped) and returns next page from new winner."""
     _mock_fetch_create_session()
@@ -851,6 +902,7 @@ def test_fetch_silent_fallback_on_endpoint_failure():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
                 "cursor": cursor,
@@ -863,7 +915,7 @@ def test_fetch_silent_fallback_on_endpoint_failure():
 
 
 @respx.mock
-def test_fetch_no_more_pages_returns_null_cursor():
+def test_fetch_no_more_pages_returns_null_cursor(paired_helper):
     _mock_fetch_create_session()
     respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
         return_value=httpx.Response(
@@ -876,6 +928,7 @@ def test_fetch_no_more_pages_returns_null_cursor():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
         )
     assert status == 200
@@ -883,7 +936,7 @@ def test_fetch_no_more_pages_returns_null_cursor():
 
 
 @respx.mock
-def test_fetch_limit_clamping():
+def test_fetch_limit_clamping(paired_helper):
     """limit: 999 clamped to 100; limit: 0 clamped to 1."""
     _mock_fetch_create_session()
     seen_limits: list[int] = []
@@ -896,21 +949,25 @@ def test_fetch_limit_clamping():
         side_effect=capture
     )
     with serve_in_background() as (port, _):
-        _request(port, "/fetch", method="POST", body={
-            "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
-            "limit": 999,
-        })
-        _request(port, "/fetch", method="POST", body={
-            "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
-            "limit": 0,
-        })
+        _request(port, "/fetch", method="POST",
+                 headers=_auth_headers(paired_helper),
+                 body={
+                     "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+                     "limit": 999,
+                 })
+        _request(port, "/fetch", method="POST",
+                 headers=_auth_headers(paired_helper),
+                 body={
+                     "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
+                     "limit": 0,
+                 })
     assert seen_limits == [100, 1]
 
 
 # --- /enrich endpoint ---
 
 
-def test_enrich_decodes_post_created_at_for_each_uri():
+def test_enrich_decodes_post_created_at_for_each_uri(paired_helper):
     """Valid at-URIs with TID rkeys → enriched populated in input order."""
     uri1 = "at://did:plc:abc/app.bsky.feed.post/3jzfcijpj2z2a"
     with serve_in_background() as (port, _):
@@ -918,6 +975,7 @@ def test_enrich_decodes_post_created_at_for_each_uri():
             port,
             "/enrich",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"uris": [uri1]},
         )
     assert status == 200
@@ -929,13 +987,14 @@ def test_enrich_decodes_post_created_at_for_each_uri():
     assert payload["errors"] == []
 
 
-def test_enrich_invalid_uri_lands_in_errors():
+def test_enrich_invalid_uri_lands_in_errors(paired_helper):
     """Empty / non-string / malformed at-URI → errors[] with reason 'invalid at-uri'."""
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/enrich",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"uris": ["", "not-a-uri", 42]},
         )
     assert status == 200
@@ -946,21 +1005,23 @@ def test_enrich_invalid_uri_lands_in_errors():
         assert err["reason"] == "invalid at-uri"
 
 
-def test_enrich_missing_uris_field_returns_400():
+def test_enrich_missing_uris_field_returns_400(paired_helper):
     with serve_in_background() as (port, _):
-        status, _, body = _request(port, "/enrich", method="POST", body={})
+        status, _, body = _request(port, "/enrich", method="POST",
+                                   headers=_auth_headers(paired_helper), body={})
     assert status == 400
     assert json.loads(body) == {"error": "missing uris"}
 
 
-def test_enrich_empty_uris_list_returns_200_with_empty_arrays():
+def test_enrich_empty_uris_list_returns_200_with_empty_arrays(paired_helper):
     with serve_in_background() as (port, _):
-        status, _, body = _request(port, "/enrich", method="POST", body={"uris": []})
+        status, _, body = _request(port, "/enrich", method="POST",
+                                   headers=_auth_headers(paired_helper), body={"uris": []})
     assert status == 200
     assert json.loads(body) == {"enriched": [], "errors": []}
 
 
-def test_enrich_credentials_field_is_ignored():
+def test_enrich_credentials_field_is_ignored(paired_helper):
     """Body with credentials is accepted (no 400); credentials are unused."""
     uri1 = "at://did:plc:abc/app.bsky.feed.post/3jzfcijpj2z2a"
     with serve_in_background() as (port, _):
@@ -968,6 +1029,7 @@ def test_enrich_credentials_field_is_ignored():
             port,
             "/enrich",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": [uri1],
                 "credentials": {"handle": "x", "app_password": "y"},
@@ -977,7 +1039,7 @@ def test_enrich_credentials_field_is_ignored():
     assert len(json.loads(body)["enriched"]) == 1
 
 
-def test_enrich_mixed_valid_and_invalid():
+def test_enrich_mixed_valid_and_invalid(paired_helper):
     """Both arrays populated, input order preserved within each."""
     valid = "at://did:plc:abc/app.bsky.feed.post/3jzfcijpj2z2a"
     with serve_in_background() as (port, _):
@@ -985,6 +1047,7 @@ def test_enrich_mixed_valid_and_invalid():
             port,
             "/enrich",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"uris": [valid, "", valid, "bogus"]},
         )
     assert status == 200
@@ -1017,7 +1080,7 @@ def _thread_view_post(uri, did, text, replies=None):
 
 
 @respx.mock
-def test_hydrate_threads_returns_threaded_in_input_order():
+def test_hydrate_threads_returns_threaded_in_input_order(paired_helper):
     _mock_fetch_create_session()
     respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
         side_effect=lambda req: httpx.Response(
@@ -1037,6 +1100,7 @@ def test_hydrate_threads_returns_threaded_in_input_order():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": uris,
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
@@ -1049,7 +1113,7 @@ def test_hydrate_threads_returns_threaded_in_input_order():
 
 
 @respx.mock
-def test_hydrate_threads_thread_replies_uses_v4_chain_logic():
+def test_hydrate_threads_thread_replies_uses_v4_chain_logic(paired_helper):
     """A reply tree where OP responds to other commenters yields no thread_replies
     (v0.3.1 chain-broken fix); a true self-thread chain yields the chain."""
     _mock_fetch_create_session()
@@ -1109,6 +1173,7 @@ def test_hydrate_threads_thread_replies_uses_v4_chain_logic():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://op/root"],
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
@@ -1121,7 +1186,7 @@ def test_hydrate_threads_thread_replies_uses_v4_chain_logic():
 
 
 @respx.mock
-def test_hydrate_threads_per_uri_failure_lands_in_errors_with_diagnostic():
+def test_hydrate_threads_per_uri_failure_lands_in_errors_with_diagnostic(paired_helper):
     """Concurrent execution means side_effect-list ordering is non-deterministic;
     use a URL-keyed mock that responds based on the requested ?uri= param."""
     _mock_fetch_create_session()
@@ -1142,6 +1207,7 @@ def test_hydrate_threads_per_uri_failure_lands_in_errors_with_diagnostic():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1", "at://x/p/2"],
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
@@ -1157,7 +1223,7 @@ def test_hydrate_threads_per_uri_failure_lands_in_errors_with_diagnostic():
 
 
 @respx.mock
-def test_hydrate_threads_credentials_validated_via_create_session():
+def test_hydrate_threads_credentials_validated_via_create_session(paired_helper):
     """Mock observes daemon called createSession once with the request's credentials."""
     create_session_route = respx.post(
         f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
@@ -1177,6 +1243,7 @@ def test_hydrate_threads_credentials_validated_via_create_session():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
@@ -1187,7 +1254,7 @@ def test_hydrate_threads_credentials_validated_via_create_session():
 
 
 @respx.mock
-def test_hydrate_threads_invalid_credentials_returns_401():
+def test_hydrate_threads_invalid_credentials_returns_401(paired_helper):
     respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession").mock(
         return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
     )
@@ -1199,6 +1266,7 @@ def test_hydrate_threads_invalid_credentials_returns_401():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {"handle": "alice.bsky.social", "app_password": "wrong"},
@@ -1209,7 +1277,7 @@ def test_hydrate_threads_invalid_credentials_returns_401():
 
 
 @respx.mock
-def test_hydrate_threads_uses_public_appview_unauthenticated():
+def test_hydrate_threads_uses_public_appview_unauthenticated(paired_helper):
     """Mock asserts the request to getPostThread had no Authorization header."""
     _mock_fetch_create_session()
     seen_auth_headers: list[str | None] = []
@@ -1228,6 +1296,7 @@ def test_hydrate_threads_uses_public_appview_unauthenticated():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
@@ -1237,7 +1306,7 @@ def test_hydrate_threads_uses_public_appview_unauthenticated():
 
 
 @respx.mock
-def test_hydrate_threads_concurrency_caps_at_5():
+def test_hydrate_threads_concurrency_caps_at_5(paired_helper):
     """20 URIs in input → mock observes at most 5 concurrent getPostThread calls."""
     _mock_fetch_create_session()
     in_flight = 0
@@ -1268,6 +1337,7 @@ def test_hydrate_threads_concurrency_caps_at_5():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": uris,
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
@@ -1278,7 +1348,7 @@ def test_hydrate_threads_concurrency_caps_at_5():
 
 
 @respx.mock
-def test_hydrate_threads_invalid_uri_in_input():
+def test_hydrate_threads_invalid_uri_in_input(paired_helper):
     _mock_fetch_create_session()
     upstream = respx.get(
         "https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread"
@@ -1288,6 +1358,7 @@ def test_hydrate_threads_invalid_uri_in_input():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["", 42, ""],
                 "credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"},
@@ -1302,24 +1373,26 @@ def test_hydrate_threads_invalid_uri_in_input():
     assert not upstream.called
 
 
-def test_hydrate_threads_missing_credentials_returns_400():
+def test_hydrate_threads_missing_credentials_returns_400(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"uris": ["at://x/p/1"]},
         )
     assert status == 400
     assert json.loads(body) == {"error": "missing credentials"}
 
 
-def test_hydrate_threads_missing_uris_returns_400():
+def test_hydrate_threads_missing_uris_returns_400(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social", "app_password": "xxxx"}},
         )
     assert status == 400
@@ -1330,7 +1403,7 @@ def test_hydrate_threads_missing_uris_returns_400():
 
 
 @respx.mock
-def test_fetch_jwt_path_happy_no_refresh():
+def test_fetch_jwt_path_happy_no_refresh(paired_helper):
     """Valid JWT pair, accessJwt still good — no refresh, no rotated_credentials."""
     # NOTE: NO _mock_fetch_create_session — JWT path skips createSession.
     respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
@@ -1344,6 +1417,7 @@ def test_fetch_jwt_path_happy_no_refresh():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "valid-access",
@@ -1359,7 +1433,7 @@ def test_fetch_jwt_path_happy_no_refresh():
 
 
 @respx.mock
-def test_fetch_jwt_path_skips_createsession():
+def test_fetch_jwt_path_skips_createsession(paired_helper):
     """With a JWT pair, the daemon must NOT call createSession at all."""
     create_session_route = respx.post(
         f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
@@ -1372,6 +1446,7 @@ def test_fetch_jwt_path_skips_createsession():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "v",
@@ -1384,7 +1459,7 @@ def test_fetch_jwt_path_skips_createsession():
 
 
 @respx.mock
-def test_fetch_jwt_path_uses_access_jwt_as_bearer():
+def test_fetch_jwt_path_uses_access_jwt_as_bearer(paired_helper):
     """Daemon sends access_jwt as the Bearer token on the upstream call."""
     seen_auth: list[str] = []
 
@@ -1400,6 +1475,7 @@ def test_fetch_jwt_path_uses_access_jwt_as_bearer():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "the-access-jwt",
@@ -1412,7 +1488,7 @@ def test_fetch_jwt_path_uses_access_jwt_as_bearer():
 
 
 @respx.mock
-def test_fetch_jwt_path_refresh_on_401_returns_rotated_credentials():
+def test_fetch_jwt_path_refresh_on_401_returns_rotated_credentials(paired_helper):
     """Direct-path: cursor-bearing call → endpoint returns 401 → daemon
     refreshes and retries with rotated tokens, returns rotated_credentials."""
     # bookmark.getBookmarks: first call (with old token) → 401, second call → 200.
@@ -1444,6 +1520,7 @@ def test_fetch_jwt_path_refresh_on_401_returns_rotated_credentials():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "expired-access",
@@ -1464,7 +1541,7 @@ def test_fetch_jwt_path_refresh_on_401_returns_rotated_credentials():
 
 
 @respx.mock
-def test_fetch_jwt_path_refresh_failure_returns_401_refresh_failed():
+def test_fetch_jwt_path_refresh_failure_returns_401_refresh_failed(paired_helper):
     """When refreshSession itself fails, return 401 with code: refresh_failed."""
     respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
         return_value=httpx.Response(401, json={"error": "ExpiredToken"})
@@ -1478,6 +1555,7 @@ def test_fetch_jwt_path_refresh_failure_returns_401_refresh_failed():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "expired",
@@ -1494,7 +1572,7 @@ def test_fetch_jwt_path_refresh_failure_returns_401_refresh_failed():
 
 
 @respx.mock
-def test_fetch_jwt_path_persistent_401_after_refresh():
+def test_fetch_jwt_path_persistent_401_after_refresh(paired_helper):
     """Refresh succeeds but retry still gets 401 → upstream_rejected_after_refresh."""
     respx.get(f"{PDS_BASE_TEST}/xrpc/app.bsky.bookmark.getBookmarks").mock(
         return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
@@ -1516,6 +1594,7 @@ def test_fetch_jwt_path_persistent_401_after_refresh():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "expired",
@@ -1532,7 +1611,7 @@ def test_fetch_jwt_path_persistent_401_after_refresh():
 
 
 @respx.mock
-def test_fetch_jwt_path_non_401_failure_no_refresh():
+def test_fetch_jwt_path_non_401_failure_no_refresh(paired_helper):
     """Non-401 direct failure (e.g. 500) triggers silent fallback, NOT refresh.
     refreshSession should not be called at all."""
     refresh_route = respx.post(
@@ -1555,6 +1634,7 @@ def test_fetch_jwt_path_non_401_failure_no_refresh():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "valid",
@@ -1573,7 +1653,7 @@ def test_fetch_jwt_path_non_401_failure_no_refresh():
 
 
 @respx.mock
-def test_fetch_jwt_path_probe_all_401_triggers_refresh():
+def test_fetch_jwt_path_probe_all_401_triggers_refresh(paired_helper):
     """First-call probe (cursor=None) — all 4 endpoints return 401 → refresh.
     PDS_BASE_TEST == APPVIEW_BASE_TEST in this fixture, so the same URL serves
     both PDS and AppView calls; we use side_effect to advance through them."""
@@ -1611,6 +1691,7 @@ def test_fetch_jwt_path_probe_all_401_triggers_refresh():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "expired",
@@ -1627,7 +1708,7 @@ def test_fetch_jwt_path_probe_all_401_triggers_refresh():
 
 
 @respx.mock
-def test_fetch_jwt_path_probe_all_non_401_no_refresh():
+def test_fetch_jwt_path_probe_all_non_401_no_refresh(paired_helper):
     """First-call probe — all endpoints return non-401 (e.g. 500/404).
     No refresh attempted; return 502."""
     refresh_route = respx.post(
@@ -1647,6 +1728,7 @@ def test_fetch_jwt_path_probe_all_non_401_no_refresh():
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "valid",
@@ -1659,24 +1741,26 @@ def test_fetch_jwt_path_probe_all_non_401_no_refresh():
     assert not refresh_route.called
 
 
-def test_fetch_missing_both_password_and_jwt_returns_400():
+def test_fetch_missing_both_password_and_jwt_returns_400(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={"credentials": {"handle": "alice.bsky.social"}},  # no app_password, no access_jwt
         )
     assert status == 400
     assert json.loads(body) == {"error": "missing credentials"}
 
 
-def test_fetch_jwt_missing_did_returns_400():
+def test_fetch_jwt_missing_did_returns_400(paired_helper):
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/fetch",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "credentials": {
                     "access_jwt": "x",
@@ -1742,7 +1826,7 @@ def test_validate_creds_app_password_path_returns_variant_app_password():
 
 
 @respx.mock
-def test_hydrate_threads_jwt_path_skips_create_session():
+def test_hydrate_threads_jwt_path_skips_create_session(paired_helper):
     """JWT path: daemon must NOT call createSession at all."""
     create_session_route = respx.post(
         f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession"
@@ -1757,6 +1841,7 @@ def test_hydrate_threads_jwt_path_skips_create_session():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {
@@ -1773,7 +1858,7 @@ def test_hydrate_threads_jwt_path_skips_create_session():
 
 
 @respx.mock
-def test_hydrate_threads_jwt_path_uses_public_appview_unauthenticated():
+def test_hydrate_threads_jwt_path_uses_public_appview_unauthenticated(paired_helper):
     """Under JWT path, the upstream getPostThread call has no Authorization header
     (just like the app-password path)."""
     seen_auth_headers: list[str | None] = []
@@ -1792,6 +1877,7 @@ def test_hydrate_threads_jwt_path_uses_public_appview_unauthenticated():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {
@@ -1806,7 +1892,7 @@ def test_hydrate_threads_jwt_path_uses_public_appview_unauthenticated():
 
 
 @respx.mock
-def test_hydrate_threads_jwt_path_no_validation_bogus_jwt_accepted():
+def test_hydrate_threads_jwt_path_no_validation_bogus_jwt_accepted(paired_helper):
     """JWT path: no JWT validation. A clearly-bogus JWT still goes through.
     The endpoint's upstream call doesn't use the JWT, so this isn't an issue."""
     respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
@@ -1819,6 +1905,7 @@ def test_hydrate_threads_jwt_path_no_validation_bogus_jwt_accepted():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {
@@ -1833,7 +1920,7 @@ def test_hydrate_threads_jwt_path_no_validation_bogus_jwt_accepted():
 
 
 @respx.mock
-def test_hydrate_threads_jwt_path_no_rotated_credentials_in_response():
+def test_hydrate_threads_jwt_path_no_rotated_credentials_in_response(paired_helper):
     """/hydrate-threads never includes rotated_credentials (no upstream call
     could trigger refresh)."""
     respx.get("https://public.api.bsky.app/xrpc/app.bsky.feed.getPostThread").mock(
@@ -1846,6 +1933,7 @@ def test_hydrate_threads_jwt_path_no_rotated_credentials_in_response():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {
@@ -1859,7 +1947,7 @@ def test_hydrate_threads_jwt_path_no_rotated_credentials_in_response():
     assert "rotated_credentials" not in payload
 
 
-def test_hydrate_threads_jwt_missing_did_returns_400():
+def test_hydrate_threads_jwt_missing_did_returns_400(paired_helper):
     """JWT path requires did; without it, _validate_creds returns None →
     400 missing credentials."""
     with serve_in_background() as (port, _):
@@ -1867,6 +1955,7 @@ def test_hydrate_threads_jwt_missing_did_returns_400():
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {
@@ -1879,13 +1968,14 @@ def test_hydrate_threads_jwt_missing_did_returns_400():
     assert status == 400
 
 
-def test_hydrate_threads_neither_password_nor_jwt_returns_400():
+def test_hydrate_threads_neither_password_nor_jwt_returns_400(paired_helper):
     """If neither app_password nor access_jwt is present, return 400."""
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/hydrate-threads",
             method="POST",
+            headers=_auth_headers(paired_helper),
             body={
                 "uris": ["at://x/p/1"],
                 "credentials": {"handle": "alice.bsky.social"},
@@ -1947,7 +2037,7 @@ def test_host_trailing_dot_returns_421():
     assert status == 421
 
 
-def test_body_at_cap_succeeds():
+def test_body_at_cap_succeeds(paired_helper):
     """A body well under the 10 MB cap is processed normally."""
     payload = json.dumps({"uris": ["at://x"] * 1000}).encode("utf-8")
     assert len(payload) < 10 * 1024 * 1024
@@ -1956,17 +2046,17 @@ def test_body_at_cap_succeeds():
             port,
             "/enrich",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=payload,
         )
     # /enrich tolerates invalid URIs and returns 200 with errors[].
     assert status == 200
 
 
-def test_body_over_cap_returns_413():
+def test_body_over_cap_returns_413(paired_helper):
     """A body over 10 MB is rejected with 413."""
     # ~11 MB of well-formed JSON. The exact byte count just needs to exceed
     # 10 * 1024 * 1024 = 10,485,760 bytes.
@@ -1986,6 +2076,7 @@ def test_body_over_cap_returns_413():
                     "Content-Type": "application/json",
                     "Origin": DEFAULT_ORIGIN,
                     "Host": f"127.0.0.1:{port}",
+                    "Authorization": f"Bearer {paired_helper}",
                 },
             )
             resp = conn.getresponse()
@@ -2032,7 +2123,7 @@ def test_options_preflight_includes_security_headers():
     assert headers["Cache-Control"] == "no-store"
 
 
-def test_fetch_rejects_pds_pointing_at_loopback():
+def test_fetch_rejects_pds_pointing_at_loopback(paired_helper):
     body = {
         "credentials": {
             "handle": "user.bsky.social",
@@ -2045,17 +2136,17 @@ def test_fetch_rejects_pds_pointing_at_loopback():
             port,
             "/fetch",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=body,
         )
     assert status == 400
     assert json.loads(body_resp) == {"error": "missing credentials"}
 
 
-def test_fetch_rejects_pds_pointing_at_metadata_ip():
+def test_fetch_rejects_pds_pointing_at_metadata_ip(paired_helper):
     body = {
         "credentials": {
             "handle": "user.bsky.social",
@@ -2068,16 +2159,16 @@ def test_fetch_rejects_pds_pointing_at_metadata_ip():
             port,
             "/fetch",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=body,
         )
     assert status == 400
 
 
-def test_hydrate_threads_rejects_pds_pointing_at_private_ip():
+def test_hydrate_threads_rejects_pds_pointing_at_private_ip(paired_helper):
     body = {
         "uris": ["at://example/post/1"],
         "credentials": {
@@ -2091,17 +2182,17 @@ def test_hydrate_threads_rejects_pds_pointing_at_private_ip():
             port,
             "/hydrate-threads",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=body,
         )
     assert status == 400
 
 
 @respx.mock
-def test_fetch_image_follows_safe_redirect_to_bsky_cdn():
+def test_fetch_image_follows_safe_redirect_to_bsky_cdn(paired_helper):
     # Set up a 302 within bsky.app → 200.
     respx.get("https://cdn.bsky.app/img/a.jpg").mock(
         return_value=httpx.Response(
@@ -2118,10 +2209,10 @@ def test_fetch_image_follows_safe_redirect_to_bsky_cdn():
             port,
             "/fetch-image",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=json.dumps(
                 {"url": "https://cdn.bsky.app/img/a.jpg"}
             ).encode("utf-8"),
@@ -2132,7 +2223,7 @@ def test_fetch_image_follows_safe_redirect_to_bsky_cdn():
 
 
 @respx.mock
-def test_fetch_image_rejects_redirect_to_non_bsky_host():
+def test_fetch_image_rejects_redirect_to_non_bsky_host(paired_helper):
     respx.get("https://cdn.bsky.app/img/a.jpg").mock(
         return_value=httpx.Response(
             302, headers={"Location": "https://evil.example/x.jpg"}
@@ -2143,10 +2234,10 @@ def test_fetch_image_rejects_redirect_to_non_bsky_host():
             port,
             "/fetch-image",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=json.dumps(
                 {"url": "https://cdn.bsky.app/img/a.jpg"}
             ).encode("utf-8"),
@@ -2179,7 +2270,7 @@ def test_log_request_escapes_control_chars(capsys):
     assert "\x1b" not in captured.err
 
 
-def test_extract_article_rejects_loopback_url_returns_400():
+def test_extract_article_rejects_loopback_url_returns_400(paired_helper):
     """The HTTP endpoint returns 400 {"error":"url not allowed"} for SSRF-blocked
     URLs. The articles._extract_article helper returns
     "fetch_error:UnsafeURLError:..." and the handler maps it to 400, distinct
@@ -2189,27 +2280,27 @@ def test_extract_article_rejects_loopback_url_returns_400():
             port,
             "/extract-article",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=json.dumps({"url": "http://127.0.0.1/secret"}).encode("utf-8"),
         )
     assert status == 400
     assert json.loads(body) == {"error": "url not allowed"}
 
 
-def test_extract_article_rejects_metadata_ip_returns_400():
+def test_extract_article_rejects_metadata_ip_returns_400(paired_helper):
     """AWS-style metadata IP gets the same 400 url-not-allowed treatment."""
     with serve_in_background() as (port, _):
         status, _, body = _request(
             port,
             "/extract-article",
             method="POST",
-            headers={
+            headers=_auth_headers(paired_helper, {
                 "Content-Type": "application/json",
                 "Origin": DEFAULT_ORIGIN,
-            },
+            }),
             body=json.dumps(
                 {"url": "http://169.254.169.254/latest/meta-data/"}
             ).encode("utf-8"),
@@ -2348,7 +2439,7 @@ def test_serve_with_gui_api_precedence(tmp_path, monkeypatch):
     assert b"bsky-saves" in body
 
 
-def test_serve_with_gui_post_to_root_is_404(tmp_path, monkeypatch):
+def test_serve_with_gui_post_to_root_is_404(tmp_path, monkeypatch, paired_helper):
     """POST / is not a real API route and shouldn't serve static files."""
     gui = _populate_gui_for_serve_test(tmp_path)
     from bsky_saves import _gui_serve
@@ -2358,17 +2449,20 @@ def test_serve_with_gui_post_to_root_is_404(tmp_path, monkeypatch):
         status, _, _ = _request(
             port, "/",
             method="POST",
-            headers={"Content-Type": "application/json", "Origin": DEFAULT_ORIGIN},
+            headers=_auth_headers(paired_helper, {
+                "Content-Type": "application/json",
+                "Origin": DEFAULT_ORIGIN,
+            }),
             body=b"{}",
         )
 
     assert status == 404
 
 
-def test_serve_without_gui_root_is_404(tmp_path):
+def test_serve_without_gui_root_is_404(paired_helper):
     """Without --gui, GET / returns the existing 404 (no static branch)."""
     with serve_in_background() as (port, _):
-        status, _, _ = _request(port, "/")
+        status, _, _ = _request(port, "/", headers=_auth_headers(paired_helper))
     assert status == 404
 
 
@@ -2385,3 +2479,95 @@ def test_serve_with_gui_unknown_api_path_404(tmp_path, monkeypatch):
     # _gui_serve, which defers (api prefix), and lands at the JSON 404 path.
     assert status == 404
     assert headers["Content-Type"] == "application/json"
+
+
+# --- v0.7.0: session-token auth tests ---
+
+
+def test_credentialed_endpoint_401_on_missing_authorization(paired_helper):
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port, "/fetch-image",
+            method="POST",
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+    assert status == 401
+    assert json.loads(body) == {"error": "authentication required"}
+
+
+def test_credentialed_endpoint_401_on_wrong_token(paired_helper):
+    with serve_in_background() as (port, _):
+        status, _, body = _request(
+            port, "/fetch-image",
+            method="POST",
+            headers=_auth_headers("not-the-real-token"),
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+    assert status == 401
+    assert json.loads(body) == {"error": "authentication required"}
+
+
+def test_credentialed_endpoint_401_on_non_bearer_scheme(paired_helper):
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/fetch-image",
+            method="POST",
+            headers={"Authorization": f"Basic {paired_helper}"},
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+    assert status == 401
+
+
+def test_ping_does_not_require_token(paired_helper):
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(port, "/ping")
+    assert status == 200
+
+
+def test_options_preflight_does_not_require_token(paired_helper):
+    with serve_in_background() as (port, _):
+        status, _, _ = _request(
+            port, "/fetch-image",
+            method="OPTIONS",
+            headers={"Origin": DEFAULT_ORIGIN, "Access-Control-Request-Method": "POST"},
+        )
+    assert status == 204
+
+
+def test_rotate_invalidates_running_daemon(paired_helper, tmp_path):
+    """If --rotate is called from a separate process while serve is running,
+    the next request from the now-stale-token client gets 401. Implementation
+    detail this verifies: _check_token reads the token on every request, not
+    once at startup."""
+    with serve_in_background() as (port, _):
+        # Sanity: original token works.
+        status, _, _ = _request(
+            port, "/fetch-image",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+        # 200/400/502 all acceptable here — point is "not 401."
+        assert status != 401
+
+        # Simulate --rotate by overwriting the token file.
+        cdir = tmp_path / "bsky-saves"
+        (cdir / "token").write_text("a-new-rotated-token\n", encoding="utf-8")
+
+        # Old token now invalid.
+        status, _, _ = _request(
+            port, "/fetch-image",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+        assert status == 401
+
+        # New token works.
+        status, _, _ = _request(
+            port, "/fetch-image",
+            method="POST",
+            headers=_auth_headers("a-new-rotated-token"),
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+        assert status != 401

@@ -48,7 +48,14 @@ _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB uniform cap on every POST body.
 _BODY_REJECTED: object = object()    # Sentinel for "413 already sent."
 
 # Bump rules: docs/protocol-versioning.md
-_PROTOCOL_VERSION = "1"
+_PROTOCOL_VERSION = "2"
+
+# Routes that bypass token authentication. /ping is the pre-pairing
+# diagnostic surface (probeHelper reads it before the GUI has any
+# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §5.
+EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/ping"),
+})
 
 
 def _bundled_gui_version() -> str | None:
@@ -655,13 +662,16 @@ def make_handler(
             return parsed if isinstance(parsed, dict) else None
 
         def _security_gate(self, method: str) -> bool:
-            """Validate Host and Origin. Returns True if the request may
-            proceed to _dispatch; returns False after sending a rejection
-            response. Called from every do_* entrypoint before route handling.
+            """Validate Host, Origin, and session token. Returns True if the
+            request may proceed to _dispatch; returns False after sending a
+            rejection response. Called from every do_* entrypoint before
+            route handling.
             """
             if not self._check_host():
                 return False
             if not self._check_origin():
+                return False
+            if not self._check_token(method):
                 return False
             return True
 
@@ -683,6 +693,42 @@ def make_handler(
                 return True
             if origin not in origins:
                 self._send_json_error(403, "Origin not allowed")
+                return False
+            return True
+
+        def _check_token(self, method: str) -> bool:
+            """Reject requests missing or carrying a wrong session token.
+            EXEMPT_ROUTES bypass; OPTIONS preflight always bypasses (CORS
+            requires preflight to succeed before custom headers can be
+            sent). Static-file requests (gui_root is not None, method is
+            GET/HEAD, path is not in ROUTES) also bypass — the GUI loads
+            index.html before it can read the meta tag, and static assets
+            contain no user data."""
+            from ._io import read_or_create_token
+            import hmac
+
+            if method == "OPTIONS":
+                return True
+            if (method, self.path) in EXEMPT_ROUTES:
+                return True
+            # Static-file branch: GET/HEAD requests to non-API paths in
+            # --gui mode are served from disk without auth.
+            if (
+                gui is not None
+                and method in ("GET", "HEAD")
+                and (method, self.path) not in ROUTES
+            ):
+                return True
+
+            header = self.headers.get("Authorization", "")
+            prefix = "Bearer "
+            if not header.startswith(prefix):
+                self._send_json_error(401, "authentication required")
+                return False
+            presented = header[len(prefix):]
+            expected = read_or_create_token()
+            if not hmac.compare_digest(presented, expected):
+                self._send_json_error(401, "authentication required")
                 return False
             return True
 
