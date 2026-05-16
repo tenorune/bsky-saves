@@ -77,9 +77,23 @@ def _handle_ping(handler) -> None:
             "version": __version__,
             "protocol": _PROTOCOL_VERSION,
             "gui_bundled": _bundled_gui_version(),
-            "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "jwt-credentials"],
+            "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "auth-check", "jwt-credentials"],
         },
     )
+
+
+def _handle_auth_check(handler) -> None:
+    """Verify the session token. Returns 200 with empty body when reached
+    (token verification happens in _security_gate before dispatch, so any
+    request that reaches this handler has a valid token). The 401 path
+    is handled identically to every other credentialed endpoint —
+    _check_token sends WWW-Authenticate: Bearer and the handler never
+    runs."""
+    handler.send_response(200)
+    handler.send_header("Content-Length", "0")
+    handler._cors_headers()
+    handler._security_headers()
+    handler.end_headers()
 
 
 def _is_allowed_image_url(url: str) -> bool:
@@ -429,6 +443,7 @@ def _handle_hydrate_threads(handler) -> None:
 
 ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("GET", "/ping"): _handle_ping,
+    ("GET", "/auth/check"): _handle_auth_check,
     ("POST", "/fetch-image"): _handle_fetch_image,
     ("POST", "/extract-article"): _handle_extract_article,
     ("POST", "/fetch"): _handle_fetch,

@@ -136,7 +136,7 @@ def test_ping_returns_full_shape(monkeypatch):
         "version": __version__,
         "protocol": "2",
         "gui_bundled": None,
-        "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "jwt-credentials"],
+        "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "auth-check", "jwt-credentials"],
     }
 
 
@@ -2579,6 +2579,42 @@ def test_pairing_401_wrong_token_includes_www_authenticate_invalid_token(paired_
             method="POST",
             headers=_auth_headers("not-the-real-token"),
             body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+    assert status == 401
+    assert headers.get("WWW-Authenticate") == 'Bearer realm="bsky-saves", error="invalid_token"'
+
+
+def test_auth_check_returns_200_empty_with_valid_token(paired_helper):
+    """GET /auth/check with a valid Bearer token returns 200 with empty
+    body — the helper-side primitive for the GUI's pairing-modal
+    'verify before stashing in localStorage' step."""
+    with serve_in_background() as (port, _):
+        status, headers, body = _request(
+            port, "/auth/check",
+            headers=_auth_headers(paired_helper),
+        )
+    assert status == 200
+    assert body == b""
+    assert headers.get("Content-Length") == "0"
+
+
+def test_auth_check_returns_401_without_authorization(paired_helper):
+    """GET /auth/check with no Authorization header returns 401 and
+    carries WWW-Authenticate: Bearer (same semantics as every other
+    credentialed endpoint)."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(port, "/auth/check")
+    assert status == 401
+    assert headers.get("WWW-Authenticate") == 'Bearer realm="bsky-saves"'
+
+
+def test_auth_check_returns_401_with_wrong_token(paired_helper):
+    """GET /auth/check with a wrong token returns 401 and carries
+    WWW-Authenticate: Bearer ..., error=\"invalid_token\"."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/auth/check",
+            headers=_auth_headers("not-the-real-token"),
         )
     assert status == 401
     assert headers.get("WWW-Authenticate") == 'Bearer realm="bsky-saves", error="invalid_token"'
