@@ -2767,3 +2767,48 @@ def test_static_assets_do_not_require_token(tmp_path, monkeypatch):
     with serve_in_background(gui=True) as (port, _):
         status, _, _ = _request(port, "/assets/style.css")
     assert status == 200
+
+
+# --- v0.6.4: first-time pairing-token print ---
+
+
+def test_maybe_print_first_time_pairing_prints_when_token_absent_and_not_gui(
+    monkeypatch, tmp_path, capsys
+):
+    """First serve on a fresh machine (no token file, --gui not set):
+    print the token with a clear pairing-context message and lazy-create
+    the token file."""
+    monkeypatch.setattr("bsky_saves._io.config_dir", lambda: tmp_path)
+    serve._maybe_print_first_time_pairing(gui=False)
+    captured = capsys.readouterr()
+    assert "first-time setup" in captured.err
+    assert (tmp_path / "token").exists()
+    written = (tmp_path / "token").read_text(encoding="utf-8").strip()
+    assert written in captured.err
+
+
+def test_maybe_print_first_time_pairing_silent_when_token_exists(
+    monkeypatch, tmp_path, capsys
+):
+    """Subsequent runs (token already exists from prior serve or token
+    --rotate): no output, file unchanged."""
+    monkeypatch.setattr("bsky_saves._io.config_dir", lambda: tmp_path)
+    (tmp_path / "token").write_text("preexisting-token-value\n", encoding="utf-8")
+    serve._maybe_print_first_time_pairing(gui=False)
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert (tmp_path / "token").read_text(encoding="utf-8").strip() == "preexisting-token-value"
+
+
+def test_maybe_print_first_time_pairing_skipped_under_gui(
+    monkeypatch, tmp_path, capsys
+):
+    """--gui flag is on: skip the print AND don't lazy-create. The bundled
+    GUI's first request triggers token creation via _gui_serve substitution
+    path; we don't want a duplicate creation path here that would print
+    before the GUI's flow runs."""
+    monkeypatch.setattr("bsky_saves._io.config_dir", lambda: tmp_path)
+    serve._maybe_print_first_time_pairing(gui=True)
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert not (tmp_path / "token").exists()
