@@ -865,6 +865,7 @@ def run_serve(
     except OSError as e:
         print(f"bsky-saves: failed to bind 127.0.0.1:{port}: {e}", file=sys.stderr)
         return 2
+    _maybe_print_first_time_pairing(gui=gui)
     print(
         f"bsky-saves serve listening on http://127.0.0.1:{port} "
         f"(origins: {', '.join(origins)})",
@@ -878,3 +879,31 @@ def run_serve(
         server.shutdown()
         server.server_close()
     return 0
+
+
+def _maybe_print_first_time_pairing(*, gui: bool, file=None) -> None:
+    """Print a one-time pairing-token message if:
+      (a) `gui` is False — the bundled-GUI flow handles pairing via
+          meta-tag substitution and doesn't need the user to see the
+          token. The friction this addresses is hosted-PWA only.
+      (b) The session token didn't already exist before this call —
+          i.e., we're about to lazy-create it for the first time on
+          this machine.
+    Silent in every other case (subsequent runs, gui mode, post-rotate
+    runs where the file persists). Called once at the start of run_serve
+    after the bind succeeds, before the "listening on" line.
+    """
+    if gui:
+        return
+    from ._io import config_dir, read_or_create_token
+    if (config_dir() / "token").exists():
+        return
+    token = read_or_create_token()
+    print(
+        "bsky-saves: first-time setup — your pairing token is:\n"
+        f"\n    {token}\n\n"
+        "Paste this into the hosted GUI's pairing modal. Persists across\n"
+        "restarts; run `bsky-saves token` to retrieve it later, or\n"
+        "`bsky-saves token --rotate` to invalidate paired sessions.\n",
+        file=file if file is not None else sys.stderr,
+    )
