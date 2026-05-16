@@ -45,6 +45,9 @@ If `bsky-saves serve` is currently running, restart it after upgrading so
 the new helper version takes effect — the GUI's outdated-helper banner
 keeps showing until the running daemon reports the upgraded version.
 
+**v0.6.x → v0.7.0:** the GUI will prompt for a one-time pairing the first
+time it connects to the upgraded helper. See [Pairing](#pairing).
+
 ## Authenticate
 
 Set two env vars from a [BlueSky app password]:
@@ -145,6 +148,39 @@ The default `Origin` allowlist is `http://127.0.0.1:<port>`,
 `--allow-origin <url>` (repeatable) to **add** to this list — for example
 if you self-host the GUI at a custom URL. The flag is additive, not
 replacing.
+
+### Pairing
+
+Since v0.7.0 the helper requires a session token on every API request
+(except `GET /ping`, which stays unauth so the GUI can probe whether
+the helper is running before pairing). The token lives at:
+
+- Linux / *BSD: `$XDG_CONFIG_HOME/bsky-saves/token` (defaulting to `~/.config/bsky-saves/token`)
+- macOS: `~/Library/Application Support/bsky-saves/token`
+- Windows: `%APPDATA%\bsky-saves\token`
+
+It is generated lazily on the first `bsky-saves serve` (or the first
+`bsky-saves token`) and persisted across daemon restarts and bsky-saves
+upgrades. File perms are `0600`.
+
+The bundled GUI (`bsky-saves serve --gui`) reads the token from a
+`<meta name="bsky-saves-token">` tag in the served `index.html` — no
+user action is needed for the bundled flow.
+
+For the hosted GUI at `https://saves.lightseed.net`, the SPA prompts
+for the token on first connect. Run:
+
+```
+bsky-saves token
+```
+
+to print the current token, then paste it into the SPA's pairing
+modal. To regenerate (invalidating any paired session — useful if you
+suspect the token leaked):
+
+```
+bsky-saves token --rotate
+```
 
 ### `--gui` mode
 

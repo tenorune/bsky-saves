@@ -33,8 +33,15 @@ than gate wholesale on `protocol`:
 
 ## Current value
 
-`protocol = "1"` — initial value as of `bsky-saves` v0.6.1, when
-`/ping` was extended with the `protocol` and `gui_bundled` fields.
+`protocol = "2"` — current as of `bsky-saves` v0.7.0.
+
+## Changelog
+
+- `"1"` — `bsky-saves` v0.6.1. Initial value when `protocol` was added to `/ping`.
+- `"2"` — `bsky-saves` v0.7.0. `Authorization: Bearer <token>` now required on
+  all credentialed endpoints (`/fetch`, `/fetch-image`, `/extract-article`,
+  `/enrich`, `/hydrate-threads`). `/ping` and OPTIONS preflight remain unauth.
+  See `docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md`.
 
 ## Cross-repo coupling
 
