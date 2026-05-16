@@ -2571,3 +2571,81 @@ def test_rotate_invalidates_running_daemon(paired_helper, tmp_path):
             body={"url": "https://cdn.bsky.app/img/abc"},
         )
         assert status != 401
+
+
+# --- v0.7.0: Task 4 – token injection into served index.html ---
+
+
+def test_index_html_substitutes_token_placeholder(paired_helper, tmp_path, monkeypatch):
+    """When --gui is on, GET / serves index.html with the sentinel
+    __BSKY_SAVES_TOKEN__ replaced by the current session token."""
+    from bsky_saves import _gui_serve
+    gui_root = tmp_path / "_gui"
+    gui_root.mkdir()
+    (gui_root / "index.html").write_text(
+        '<html><head><meta name="bsky-saves-token" content="__BSKY_SAVES_TOKEN__"></head></html>',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui_root)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, _, body = _request(port, "/")
+    assert status == 200
+    text = body.decode("utf-8")
+    assert "__BSKY_SAVES_TOKEN__" not in text
+    assert paired_helper in text
+
+
+def test_index_html_substitutes_in_spa_fallback(paired_helper, tmp_path, monkeypatch):
+    from bsky_saves import _gui_serve
+    gui_root = tmp_path / "_gui"
+    gui_root.mkdir()
+    (gui_root / "index.html").write_text(
+        '<html><head><meta name="bsky-saves-token" content="__BSKY_SAVES_TOKEN__"></head></html>',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui_root)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, _, body = _request(port, "/some/spa/route")
+    assert status == 200
+    assert paired_helper in body.decode("utf-8")
+
+
+def test_non_index_static_files_are_not_substituted(paired_helper, tmp_path, monkeypatch):
+    """A CSS file containing the literal sentinel must NOT be substituted —
+    only index.html and the SPA fallback go through the substitution path."""
+    from bsky_saves import _gui_serve
+    gui_root = tmp_path / "_gui"
+    gui_root.mkdir()
+    (gui_root / "index.html").write_text("<html></html>", encoding="utf-8")
+    assets = gui_root / "assets"
+    assets.mkdir()
+    css_body = "/* token sentinel: __BSKY_SAVES_TOKEN__ */"
+    (assets / "style.css").write_text(css_body, encoding="utf-8")
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui_root)
+
+    with serve_in_background(gui=True) as (port, _):
+        status, _, body = _request(port, "/assets/style.css")
+    assert status == 200
+    assert body.decode("utf-8") == css_body
+
+
+def test_static_assets_do_not_require_token(tmp_path, monkeypatch):
+    """Per spec §8: static assets in --gui mode are exempt from token auth.
+    Counterpart to the credentialed-endpoint 401 tests in Task 3."""
+    from bsky_saves import _gui_serve
+    gui_root = tmp_path / "_gui"
+    gui_root.mkdir()
+    (gui_root / "index.html").write_text("<html></html>", encoding="utf-8")
+    assets = gui_root / "assets"
+    assets.mkdir()
+    (assets / "style.css").write_text("body{}", encoding="utf-8")
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: gui_root)
+
+    # No paired_helper fixture — config_dir is the real one. The static-file
+    # branch in _check_token must bypass auth entirely (per spec §5), so this
+    # request should succeed without us setting up any token state.
+    with serve_in_background(gui=True) as (port, _):
+        status, _, _ = _request(port, "/assets/style.css")
+    assert status == 200

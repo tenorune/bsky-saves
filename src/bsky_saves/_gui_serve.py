@@ -65,6 +65,8 @@ _API_PATHS = frozenset({
     "/hydrate-threads",
 })
 
+_TOKEN_PLACEHOLDER = b"__BSKY_SAVES_TOKEN__"
+
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
     ".htm": "text/html; charset=utf-8",
@@ -167,6 +169,13 @@ def _send_file(
     is_spa_fallback: bool = False,
 ) -> None:
     body = path.read_bytes()
+    # Substitute the session-token placeholder in index.html (root or SPA
+    # fallback). Other files served verbatim. Idempotent: if the placeholder
+    # is absent (older GUI bundle), body is unchanged.
+    if rel_path == "index.html" or is_spa_fallback:
+        if _TOKEN_PLACEHOLDER in body:
+            from ._io import read_or_create_token
+            body = body.replace(_TOKEN_PLACEHOLDER, read_or_create_token().encode("ascii"))
     handler.send_response(200)
     handler.send_header("Content-Type", content_type_for(path))
     handler.send_header("Content-Length", str(len(body)))
