@@ -116,7 +116,7 @@ jobs:
             `repository_dispatch` from `bsky-saves-gui`.
 
             **Release:** [${{ github.event.client_payload.ref_name }}](https://github.com/tenorune/bsky-saves-gui/releases/tag/${{ github.event.client_payload.ref_name }})
-            **Tarball:** <${{ github.event.client_payload.tarball_url }}>
+            **Tarball:** ${{ github.event.client_payload.tarball_url }}
             **SHA-256:** `${{ github.event.client_payload.sha256 }}`
 
             The workflow already re-verified the tarball SHA against the
