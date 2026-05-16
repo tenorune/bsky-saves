@@ -92,8 +92,14 @@ def test_unknown_method_returns_404():
     assert json.loads(body) == {"error": "not found"}
 
 
-def test_ping_returns_name_version_features():
+def test_ping_returns_full_shape(monkeypatch):
+    """Asserts the full /ping response shape. gui_bundled is forced to None
+    here so the assertion is deterministic regardless of whether the test
+    environment has src/bsky_saves/_gui/.gui-version populated (which it
+    does in verify.yml CI after fetch_gui.py runs, but not in a bare dev
+    checkout). The "marker present" path is covered by the test below."""
     from bsky_saves import __version__
+    monkeypatch.setattr(serve, "_bundled_gui_version", lambda: None)
     with serve_in_background() as (port, _):
         status, headers, body = _request(port, "/ping")
     assert status == 200
@@ -102,8 +108,37 @@ def test_ping_returns_name_version_features():
     assert payload == {
         "name": "bsky-saves",
         "version": __version__,
+        "protocol": "1",
+        "gui_bundled": None,
         "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "jwt-credentials"],
     }
+
+
+def test_ping_includes_gui_bundled_when_marker_present(monkeypatch):
+    monkeypatch.setattr(serve, "_bundled_gui_version", lambda: "1.2.3")
+    with serve_in_background() as (port, _):
+        status, _, body = _request(port, "/ping")
+    assert status == 200
+    assert json.loads(body)["gui_bundled"] == "1.2.3"
+
+
+def test_bundled_gui_version_reads_marker_file(tmp_path, monkeypatch):
+    """Direct test of the helper that powers /ping's gui_bundled field.
+    Monkeypatches _gui_serve._gui_root_path so the lookup hits a temp dir.
+    The marker format is `{version}\\n{sha256}\\n` (written by
+    scripts/fetch_gui.py); only the first line is the version.
+    """
+    from bsky_saves import _gui_serve
+    monkeypatch.setattr(_gui_serve, "_gui_root_path", lambda: tmp_path)
+    assert serve._bundled_gui_version() is None
+    marker = tmp_path / ".gui-version"
+    marker.write_text(
+        "0.6.0\ne47e0c416c6d353b55e211bb0ea55b0c5a4be9d0f46f925cd99100653a3151ba\n",
+        encoding="utf-8",
+    )
+    assert serve._bundled_gui_version() == "0.6.0"
+    marker.write_text("", encoding="utf-8")
+    assert serve._bundled_gui_version() is None
 
 
 def test_options_preflight_returns_204_with_cors():

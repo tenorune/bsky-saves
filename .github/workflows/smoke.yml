@@ -67,8 +67,16 @@ jobs:
 
       - name: Smoke /ping endpoint
         run: |
-          curl -fsS http://127.0.0.1:47826/ping | \
-            python -c 'import sys, json; d = json.load(sys.stdin); assert d["name"] == "bsky-saves", d'
+          PINNED=$(awk -F\" '/^gui_version/{print $2}' pyproject.toml)
+          export PINNED
+          curl -fsS http://127.0.0.1:47826/ping | python3 -c '
+          import os, sys, json
+          d = json.loads(sys.stdin.read())
+          assert d["name"] == "bsky-saves", d
+          assert d["protocol"] == "1", d
+          expected = os.environ["PINNED"]
+          assert d["gui_bundled"] == expected, (d["gui_bundled"], expected)
+          '
 
       - name: Smoke /assets/* endpoint
         run: |

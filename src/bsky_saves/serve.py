@@ -47,6 +47,26 @@ from .tid import rkey_of, decode_tid_to_iso
 _MAX_BODY_BYTES = 10 * 1024 * 1024  # 10 MB uniform cap on every POST body.
 _BODY_REJECTED: object = object()    # Sentinel for "413 already sent."
 
+# Bump rules: docs/protocol-versioning.md
+_PROTOCOL_VERSION = "1"
+
+
+def _bundled_gui_version() -> str | None:
+    """Return the version of the bsky-saves-gui bundle vendored into this
+    wheel, or None when no bundle is present (dev install without the
+    build-time fetch_gui hook having run). The marker file is written by
+    scripts/fetch_gui.py post-extraction in a `{version}\\n{sha256}\\n`
+    format; we return just the first line.
+    """
+    from ._gui_serve import _gui_root_path
+    marker = _gui_root_path() / ".gui-version"
+    try:
+        text = marker.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    first = text.splitlines()[0].strip() if text else ""
+    return first or None
+
 
 def _handle_ping(handler) -> None:
     handler._send_json(
@@ -54,6 +74,8 @@ def _handle_ping(handler) -> None:
         {
             "name": "bsky-saves",
             "version": __version__,
+            "protocol": _PROTOCOL_VERSION,
+            "gui_bundled": _bundled_gui_version(),
             "features": ["fetch-image", "extract-article", "fetch", "enrich", "hydrate-threads", "jwt-credentials"],
         },
     )
