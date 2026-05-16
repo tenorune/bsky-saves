@@ -68,12 +68,13 @@ jobs:
       - name: Smoke /ping endpoint
         run: |
           PINNED=$(awk -F\" '/^gui_version/{print $2}' pyproject.toml)
-          export PINNED
+          EXPECTED_PROTOCOL=$(/tmp/smoke/bin/python -c "from bsky_saves.serve import _PROTOCOL_VERSION; print(_PROTOCOL_VERSION)")
+          export PINNED EXPECTED_PROTOCOL
           curl -fsS http://127.0.0.1:47826/ping | python3 -c '
           import os, sys, json
           d = json.loads(sys.stdin.read())
           assert d["name"] == "bsky-saves", d
-          assert d["protocol"] == "1", d
+          assert d["protocol"] == os.environ["EXPECTED_PROTOCOL"], d
           expected = os.environ["PINNED"]
           assert d["gui_bundled"] == expected, (d["gui_bundled"], expected)
           '
@@ -85,10 +86,21 @@ jobs:
           echo "Testing /assets/$ASSET"
           curl -fsS "http://127.0.0.1:47826/assets/$ASSET" > /dev/null
 
-      - name: Smoke /fetch-image rejection
+      - name: Smoke /fetch-image requires auth
         run: |
           STATUS=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
               http://127.0.0.1:47826/fetch-image \
+              -H 'Content-Type: application/json' \
+              -H "Origin: http://127.0.0.1:47826" \
+              -d '{"url":"https://cdn.bsky.app/x.png"}')
+          test "$STATUS" = "401" || { echo "expected 401 without auth, got $STATUS"; exit 1; }
+
+      - name: Smoke /fetch-image rejection
+        run: |
+          TOKEN=$(/tmp/smoke/bin/bsky-saves token)
+          STATUS=$(curl -sS -o /dev/null -w "%{http_code}" -X POST \
+              http://127.0.0.1:47826/fetch-image \
+              -H "Authorization: Bearer $TOKEN" \
               -H 'Content-Type: application/json' \
               -H "Origin: http://127.0.0.1:47826" \
               -d '{"url":"https://evil.com/x.png"}')
