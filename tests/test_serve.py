@@ -179,7 +179,7 @@ def test_options_preflight_returns_204_with_cors():
     assert body == b""
     assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
     assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
-    assert headers["Access-Control-Allow-Headers"] == "Content-Type"
+    assert headers["Access-Control-Allow-Headers"] == "Content-Type, Authorization"
     assert headers["Access-Control-Max-Age"] == "600"
 
 
@@ -223,6 +223,21 @@ def test_cors_404_response_still_carries_cors_headers(paired_helper):
         )
     assert status == 404
     assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
+
+
+def test_401_response_carries_cors_headers(paired_helper):
+    """A 401 from auth rejection must carry Access-Control-Allow-Origin when
+    the Origin is in the allowlist, so the browser can read the body and
+    surface a pairing prompt instead of just seeing a CORS error."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/fetch-image",
+            method="POST",
+            headers={"Origin": DEFAULT_ORIGIN},  # No Authorization → 401
+            body={"url": "https://cdn.bsky.app/x"},
+        )
+    assert status == 401
+    assert headers.get("Access-Control-Allow-Origin") == DEFAULT_ORIGIN
 
 
 import httpx as _httpx_mod  # noqa: F401  (used implicitly by respx)
