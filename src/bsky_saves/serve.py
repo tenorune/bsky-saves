@@ -600,6 +600,10 @@ def make_handler(
                 self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+            # Exposes WWW-Authenticate so cross-origin GUI JS can distinguish
+            # a pairing-401 (header present) from an upstream-cause 401
+            # (header absent). See docs/superpowers/specs/2026-05-16-...session-token.md §5.
+            self.send_header("Access-Control-Expose-Headers", "WWW-Authenticate")
             self.send_header("Access-Control-Max-Age", "600")
 
         def _security_headers(self) -> None:
@@ -607,21 +611,31 @@ def make_handler(
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Cache-Control", "no-store")
 
-        def _send_json(self, code: int, payload: dict) -> None:
+        def _send_json(self, code: int, payload: dict, *, extra_headers: dict | None = None) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
+            if extra_headers:
+                for name, value in extra_headers.items():
+                    self.send_header(name, value)
             self._cors_headers()
             self._security_headers()
             self.end_headers()
             self.wfile.write(body)
 
-        def _send_json_error(self, code: int, error: str, *, extra: dict | None = None) -> None:
+        def _send_json_error(
+            self,
+            code: int,
+            error: str,
+            *,
+            extra: dict | None = None,
+            extra_headers: dict | None = None,
+        ) -> None:
             payload: dict = {"error": error}
             if extra:
                 payload.update(extra)
-            self._send_json(code, payload)
+            self._send_json(code, payload, extra_headers=extra_headers)
 
         def _send_bytes(
             self,
@@ -718,15 +732,27 @@ def make_handler(
             ):
                 return True
 
+            # Pairing-401s carry WWW-Authenticate: Bearer so cross-origin
+            # GUIs can distinguish them from upstream-PDS 401s (which never
+            # carry the header). RFC 6750 §3.1 conventions: missing/malformed
+            # token → bare Bearer challenge; wrong value → error="invalid_token".
             header = self.headers.get("Authorization", "")
             prefix = "Bearer "
             if not header.startswith(prefix):
-                self._send_json_error(401, "authentication required")
+                self._send_json_error(
+                    401,
+                    "authentication required",
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="bsky-saves"'},
+                )
                 return False
             presented = header[len(prefix):]
             expected = read_or_create_token()
             if not hmac.compare_digest(presented, expected):
-                self._send_json_error(401, "authentication required")
+                self._send_json_error(
+                    401,
+                    "authentication required",
+                    extra_headers={"WWW-Authenticate": 'Bearer realm="bsky-saves", error="invalid_token"'},
+                )
                 return False
             return True
 

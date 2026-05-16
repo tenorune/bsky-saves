@@ -165,9 +165,18 @@ EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset({
 {"error": "authentication required"}
 ```
 
-No `WWW-Authenticate` header is emitted — bearer tokens are not realm-scoped, and we do not want browsers to surface a native auth dialog.
+**`WWW-Authenticate: Bearer realm="bsky-saves"`** is emitted on every pairing-401 (i.e., 401s produced by `_check_token`). The wrong-token case includes `error="invalid_token"` per RFC 6750 §3.1:
 
-The 401 body is intentionally generic: it does not distinguish "no Authorization header" from "wrong token." The GUI side already knows what to do on 401 (re-fetch `index.html` for bundled, show pairing modal for hosted).
+- Missing / non-`Bearer` `Authorization` header → `WWW-Authenticate: Bearer realm="bsky-saves"`
+- `Bearer` present but token value mismatches → `WWW-Authenticate: Bearer realm="bsky-saves", error="invalid_token"`
+
+(Note: only the `Bearer` scheme triggers this header; `Basic` would prompt the browser's native auth dialog, but `Bearer` does not. The earlier spec revision that suppressed the header was based on a misreading of that browser behaviour.)
+
+**Upstream-cause 401s** (e.g., `_handle_fetch`'s `createSession failed` passthrough, or `_handle_hydrate_threads`'s same path) do **not** carry `WWW-Authenticate`. This presence-or-absence is the signal the GUI uses to distinguish pairing failures (trigger pairing recovery — re-fetch `index.html` for bundled, surface pairing modal for hosted) from upstream-PDS auth failures (existing GUI handling).
+
+The 401 body remains intentionally generic — `{"error": "authentication required"}` — for both pairing-401 cases. The header alone carries the distinction-from-upstream signal; the wrong-token-vs-missing-header sub-distinction is informational only (the GUI's recovery flow is the same either way).
+
+**`Access-Control-Expose-Headers: WWW-Authenticate`** is added to `_cors_headers` so the cross-origin GUI's `fetch()` JS can actually read the header. Without this, the browser filters non-simple response headers out of what JS can see.
 
 ## 6. CLI surface
 

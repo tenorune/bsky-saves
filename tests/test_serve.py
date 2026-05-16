@@ -898,6 +898,30 @@ def test_fetch_createsession_failure_returns_401(paired_helper):
 
 
 @respx.mock
+def test_upstream_cause_401_does_not_include_www_authenticate(paired_helper):
+    """An upstream-PDS 401 (createSession rejected by the PDS) is
+    structurally distinct from a pairing-401 (bsky-saves rejecting the
+    GUI's Bearer token). The pairing-401 carries WWW-Authenticate; the
+    upstream-401 must NOT — that's the signal the GUI uses to decide
+    whether to surface pairing recovery vs. existing upstream handling."""
+    respx.post(f"{PDS_BASE_TEST}/xrpc/com.atproto.server.createSession").mock(
+        return_value=httpx.Response(401, json={"error": "AuthenticationRequired"})
+    )
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port,
+            "/fetch",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body={"credentials": {"handle": "alice.bsky.social", "app_password": "wrong"}},
+        )
+    assert status == 401
+    assert headers.get("WWW-Authenticate") is None, (
+        f"upstream-cause 401 must not carry WWW-Authenticate; got {headers.get('WWW-Authenticate')!r}"
+    )
+
+
+@respx.mock
 def test_fetch_silent_fallback_on_endpoint_failure(paired_helper):
     """Continuation with a wrapped cursor whose named endpoint returns 5xx →
     daemon re-probes (cursor dropped) and returns next page from new winner."""
@@ -2531,6 +2555,46 @@ def test_credentialed_endpoint_401_on_non_bearer_scheme(paired_helper):
             body={"url": "https://cdn.bsky.app/img/abc"},
         )
     assert status == 401
+
+
+def test_pairing_401_missing_header_includes_www_authenticate_bearer(paired_helper):
+    """Pairing-401 (no Bearer prefix) carries WWW-Authenticate: Bearer so
+    cross-origin GUIs can distinguish it from an upstream-cause 401."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/fetch-image",
+            method="POST",
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+    assert status == 401
+    assert headers.get("WWW-Authenticate") == 'Bearer realm="bsky-saves"'
+
+
+def test_pairing_401_wrong_token_includes_www_authenticate_invalid_token(paired_helper):
+    """Pairing-401 (Bearer present but token mismatches) carries
+    WWW-Authenticate with error=\"invalid_token\" per RFC 6750 §3.1."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/fetch-image",
+            method="POST",
+            headers=_auth_headers("not-the-real-token"),
+            body={"url": "https://cdn.bsky.app/img/abc"},
+        )
+    assert status == 401
+    assert headers.get("WWW-Authenticate") == 'Bearer realm="bsky-saves", error="invalid_token"'
+
+
+def test_response_exposes_www_authenticate_via_cors(paired_helper):
+    """Access-Control-Expose-Headers includes WWW-Authenticate so the
+    cross-origin GUI's fetch() JS can actually read the header to make
+    the pairing-vs-upstream-401 distinction."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(port, "/ping")
+    assert status == 200
+    expose = headers.get("Access-Control-Expose-Headers", "")
+    # Tolerate either bare value or comma-separated list with extras (future-proof).
+    tokens = [t.strip() for t in expose.split(",")]
+    assert "WWW-Authenticate" in tokens, f"expected WWW-Authenticate in {expose!r}"
 
 
 def test_ping_does_not_require_token(paired_helper):
