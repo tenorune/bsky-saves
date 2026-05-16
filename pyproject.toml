@@ -49,7 +49,7 @@ bsky-saves = "bsky_saves.cli:main"
 # dist.tar.gz from https://github.com/tenorune/bsky-saves-gui/releases/
 # download/v{gui_version}/dist.tar.gz and verifies it against gui-dist.sha256.
 # Bumping this requires updating gui-dist.sha256 from the same release.
-gui_version = "0.6.0"
+gui_version = "0.6.1"
 
 [tool.hatch.build]
 # _gui/ is gitignored (vendored at build time); explicitly include it in the wheel.
