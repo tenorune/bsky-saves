@@ -1,4 +1,4 @@
-"""Low-level inventory I/O helpers shared by every write callsite."""
+"""Low-level I/O helpers: inventory writes and session-token management."""
 from __future__ import annotations
 
 import base64
@@ -7,6 +7,8 @@ import os
 import secrets
 import sys
 from pathlib import Path
+
+_TOKEN_BYTES = 32
 
 
 def config_dir() -> Path:
@@ -39,9 +41,12 @@ def read_or_create_token() -> str:
     Location: <config_dir>/token. File perms: 0o600. Atomic-write via temp
     file + os.replace. Returns the first non-empty line of the file, stripped.
 
-    If multiple bsky-saves processes race to create the file, the loser's
-    os.replace overwrites the winner; whichever token wins the race becomes
-    canonical. The user re-pairs at most once.
+    If two bsky-saves processes race to lazy-create, both succeed at writing
+    a token to the temp file (last-writer-wins on the temp file body); the
+    second os.replace then overwrites the first. Both tokens are valid 0o600
+    files; the second-replaced value sticks. A token.tmp file left over from
+    a crashed prior write is recovered by truncate-on-next-open, not blocking
+    future creation.
     """
     cdir = config_dir()
     path = cdir / "token"
@@ -52,10 +57,10 @@ def read_or_create_token() -> str:
                 return stripped
         # Empty file → fall through and regenerate.
 
-    cdir.mkdir(parents=True, exist_ok=True)
-    fresh = base64.urlsafe_b64encode(secrets.token_bytes(32)).rstrip(b"=").decode("ascii")
+    cdir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fresh = base64.urlsafe_b64encode(secrets.token_bytes(_TOKEN_BYTES)).rstrip(b"=").decode("ascii")
     tmp = path.with_suffix(".tmp")
-    fd = os.open(str(tmp), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    fd = os.open(str(tmp), os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
     try:
         os.write(fd, (fresh + "\n").encode("ascii"))
     finally:

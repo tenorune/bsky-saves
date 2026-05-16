@@ -1,4 +1,4 @@
-"""Unit tests for bsky_saves._io.atomic_write_inventory."""
+"""Unit tests for bsky_saves._io."""
 from __future__ import annotations
 
 import json
@@ -81,7 +81,7 @@ def test_config_dir_windows(monkeypatch, tmp_path):
 def test_read_or_create_token_lazy_creates(monkeypatch, tmp_path):
     monkeypatch.setattr("bsky_saves._io.config_dir", lambda: tmp_path)
     token = read_or_create_token()
-    assert re.fullmatch(r"[A-Za-z0-9_-]{42,44}", token), token
+    assert re.fullmatch(r"[A-Za-z0-9_-]{43}", token), token
     assert (tmp_path / "token").read_text(encoding="utf-8").strip() == token
 
 
@@ -102,13 +102,28 @@ def test_read_or_create_token_file_perms(monkeypatch, tmp_path):
 
 def test_read_or_create_token_strips_trailing_newline(monkeypatch, tmp_path):
     monkeypatch.setattr("bsky_saves._io.config_dir", lambda: tmp_path)
-    (tmp_path).mkdir(parents=True, exist_ok=True)
     (tmp_path / "token").write_text("preexisting-token-value\n", encoding="utf-8")
     assert read_or_create_token() == "preexisting-token-value"
 
 
 def test_read_or_create_token_multiline_returns_first_line(monkeypatch, tmp_path):
     monkeypatch.setattr("bsky_saves._io.config_dir", lambda: tmp_path)
-    (tmp_path).mkdir(parents=True, exist_ok=True)
     (tmp_path / "token").write_text("first-line\nsecond-line\n", encoding="utf-8")
     assert read_or_create_token() == "first-line"
+
+
+def test_read_or_create_token_regenerates_on_empty_file(monkeypatch, tmp_path):
+    monkeypatch.setattr("bsky_saves._io.config_dir", lambda: tmp_path)
+    (tmp_path / "token").write_text("", encoding="utf-8")
+    token = read_or_create_token()
+    assert re.fullmatch(r"[A-Za-z0-9_-]{43}", token), token
+    # File should now contain the freshly-generated token.
+    assert (tmp_path / "token").read_text(encoding="utf-8").strip() == token
+
+
+def test_config_dir_windows_no_appdata(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows Path.home() uses USERPROFILE
+    assert config_dir() == tmp_path / "AppData" / "Roaming" / "bsky-saves"
