@@ -126,11 +126,12 @@ bsky-saves serve [--gui] [--port 47826] [--allow-origin ORIGIN]... [--verbose]
 The daemon binds only to `127.0.0.1`, writes nothing to disk, reads no
 config files, validates the `Host` header to reject DNS-rebinding attempts
 (`421`), enforces an `Origin` allowlist (`403` for anything outside the
-defaults), caps request bodies at 10 MB, and exposes six endpoints:
+defaults), caps request bodies at 10 MB, and exposes seven endpoints:
 
 | Endpoint | Credentials | Purpose |
 |---|---|---|
 | `GET /ping` | — | Health check; advertises supported endpoints in a `features` array |
+| `GET /auth/check` | — | Verify the paired session token; `200` empty body on success, `401` otherwise |
 | `POST /fetch-image` | — | Download a `cdn.bsky.app` image; returns the bytes |
 | `POST /extract-article` | — | Fetch + trafilatura-extract text from an article URL |
 | `POST /fetch` | required | Paginated bookmark enumeration with opaque cursor |
