@@ -27,6 +27,24 @@ PDS-direct rather than through the AppView.
 pip install bsky-saves
 ```
 
+## Upgrade
+
+If you installed with `pipx` (recommended for CLI tools):
+
+```
+pipx upgrade bsky-saves
+```
+
+If you installed with `pip`:
+
+```
+pip install --upgrade bsky-saves
+```
+
+If `bsky-saves serve` is currently running, restart it after upgrading so
+the new helper version takes effect — the GUI's outdated-helper banner
+keeps showing until the running daemon reports the upgraded version.
+
 ## Authenticate
 
 Set two env vars from a [BlueSky app password]:
