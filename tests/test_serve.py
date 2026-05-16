@@ -2597,6 +2597,8 @@ def test_index_html_substitutes_token_placeholder(paired_helper, tmp_path, monke
 
 
 def test_index_html_substitutes_in_spa_fallback(paired_helper, tmp_path, monkeypatch):
+    """When --gui is on, a GET to a non-existent SPA route falls back to
+    index.html with the same placeholder substitution as the root path."""
     from bsky_saves import _gui_serve
     gui_root = tmp_path / "_gui"
     gui_root.mkdir()
@@ -2609,6 +2611,7 @@ def test_index_html_substitutes_in_spa_fallback(paired_helper, tmp_path, monkeyp
     with serve_in_background(gui=True) as (port, _):
         status, _, body = _request(port, "/some/spa/route")
     assert status == 200
+    assert "__BSKY_SAVES_TOKEN__" not in body.decode("utf-8")
     assert paired_helper in body.decode("utf-8")
 
 

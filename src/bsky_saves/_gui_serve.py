@@ -9,6 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+from ._io import read_or_create_token
+
 
 class GuiNotInstalledError(Exception):
     """The bundled GUI tarball is missing or empty.
@@ -174,7 +176,6 @@ def _send_file(
     # is absent (older GUI bundle), body is unchanged.
     if rel_path == "index.html" or is_spa_fallback:
         if _TOKEN_PLACEHOLDER in body:
-            from ._io import read_or_create_token
             body = body.replace(_TOKEN_PLACEHOLDER, read_or_create_token().encode("ascii"))
     handler.send_response(200)
     handler.send_header("Content-Type", content_type_for(path))
