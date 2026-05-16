@@ -2496,7 +2496,7 @@ def test_serve_with_gui_unknown_api_path_404(tmp_path, monkeypatch):
     assert headers["Content-Type"] == "application/json"
 
 
-# --- v0.7.0: session-token auth tests ---
+# --- v0.6.2: session-token auth tests ---
 
 
 def test_credentialed_endpoint_401_on_missing_authorization(paired_helper):
@@ -2588,7 +2588,7 @@ def test_rotate_invalidates_running_daemon(paired_helper, tmp_path):
         assert status != 401
 
 
-# --- v0.7.0: Task 4 – token injection into served index.html ---
+# --- v0.6.2: Task 4 – token injection into served index.html ---
 
 
 def test_index_html_substitutes_token_placeholder(paired_helper, tmp_path, monkeypatch):

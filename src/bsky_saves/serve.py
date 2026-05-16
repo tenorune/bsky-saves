@@ -438,7 +438,7 @@ ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
 
 # Routes that bypass token authentication. /ping is the pre-pairing
 # diagnostic surface (probeHelper reads it before the GUI has any
-# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §5.
+# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md §5.
 EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/ping"),
 })

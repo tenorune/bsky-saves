@@ -1,4 +1,4 @@
-# bsky-saves v0.7.0 — Session-token implementation plan
+# bsky-saves v0.6.2 — Session-token implementation plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+, stdlib only (no new deps). `hatchling` build backend. `pytest` for tests. `httpx`/`respx` for the existing HTTP test patterns.
 
-**Spec:** `docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md`
+**Spec:** `docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md`
 
 **Branch:** `claude/installer-prep` (extends PR #9).
 
@@ -26,8 +26,8 @@
 | `tests/test_serve.py` | Modify | New `paired_helper` fixture; retrofit every existing credentialed-endpoint test to send `Authorization: Bearer <token>`; new auth-specific tests (401 missing, 401 wrong, `/ping` exempt, OPTIONS exempt, rotate-invalidates). |
 | `tests/test_gui_serve.py` (or extend `test_serve.py`'s `--gui` block) | Modify | New tests for placeholder substitution in served `index.html` and SPA fallback; non-index files unchanged. |
 | `tests/test_token_cli.py` | Create | Tests for `bsky-saves token` (prints existing, lazy-generates) and `bsky-saves token --rotate` (writes new value, invalidates prior). |
-| `pyproject.toml` | Modify | `version = "0.7.0"`. |
-| `docs/protocol-versioning.md` | Modify | Add Changelog subsection: `"1"` → v0.6.1, `"2"` → v0.7.0. |
+| `pyproject.toml` | Modify | `version = "0.6.2"`. |
+| `docs/protocol-versioning.md` | Modify | Add Changelog subsection: `"1"` → v0.6.1, `"2"` → v0.6.2. |
 | `README.md` | Modify | New `### Pairing` subsection under `## bsky-saves serve`; one-line upgrade note in `## Upgrade`. |
 
 ---
@@ -225,14 +225,14 @@ Expected: 9 passed (3 existing + 6 new).
 
 ```bash
 git add src/bsky_saves/_io.py tests/test_io.py
-git commit -m "feat(_io): add config_dir() and read_or_create_token() for v0.7.0 session token
+git commit -m "feat(_io): add config_dir() and read_or_create_token() for v0.6.2 session token
 
 Platform-conventional config dir resolution (XDG / macOS Application
 Support / Windows APPDATA), and lazy-generated 32-byte base64url
 session token at <config_dir>/token with 0600 perms and atomic write.
 
-Foundation for the helper-side session-token auth landing in v0.7.0
-(see docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md)."
+Foundation for the helper-side session-token auth landing in v0.6.2
+(see docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md)."
 ```
 
 ---
@@ -403,7 +403,7 @@ Then add (after the `_BODY_REJECTED` block, near `_PROTOCOL_VERSION`):
 ```python
 # Routes that bypass token authentication. /ping is the pre-pairing
 # diagnostic surface (probeHelper reads it before the GUI has any
-# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §5.
+# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md §5.
 EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset({
     ("GET", "/ping"),
 })
@@ -721,7 +721,7 @@ Expected: 365+ passed.
 git add src/bsky_saves/serve.py tests/test_serve.py
 git commit -m "feat(serve): require Authorization: Bearer on credentialed endpoints
 
-v0.7.0 session-token enforcement. _security_gate gains a third check
+v0.6.2 session-token enforcement. _security_gate gains a third check
 after Host + Origin: every route except /ping (and OPTIONS preflight,
 and static-file paths when --gui is on) requires Authorization: Bearer
 <token>, where <token> is the value at <config_dir>/bsky-saves/token
@@ -742,7 +742,7 @@ known test token. New auth-specific tests cover the missing-header,
 wrong-token, non-Bearer, /ping-exemption, OPTIONS-exemption, and
 rotate-invalidation paths.
 
-Spec: docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §5, §9."
+Spec: docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md §5, §9."
 ```
 
 ---
@@ -896,7 +896,7 @@ index.html and SPA fallbacks go through the substitution path.
 Idempotent: if the placeholder is absent (older GUI bundle), body
 is unchanged.
 
-Spec: docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §7."
+Spec: docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md §7."
 ```
 
 ---
@@ -913,7 +913,7 @@ Spec: docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §7."
 Change line 7:
 
 ```toml
-version = "0.7.0"
+version = "0.6.2"
 ```
 
 - [ ] **Step 5.2: Add Changelog subsection to `docs/protocol-versioning.md`**
@@ -924,16 +924,16 @@ Append before the existing "## Cross-repo coupling" section:
 ## Changelog
 
 - `"1"` — `bsky-saves` v0.6.1. Initial value when `protocol` was added to `/ping`.
-- `"2"` — `bsky-saves` v0.7.0. `Authorization: Bearer <token>` now required on
+- `"2"` — `bsky-saves` v0.6.2. `Authorization: Bearer <token>` now required on
   all credentialed endpoints (`/fetch`, `/fetch-image`, `/extract-article`,
   `/enrich`, `/hydrate-threads`). `/ping` and OPTIONS preflight remain unauth.
-  See `docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md`.
+  See `docs/superpowers/specs/2026-05-16-bsky-saves-v0.6.2-session-token.md`.
 ```
 
 Also update the "## Current value" section's line to read:
 
 ```markdown
-`protocol = "2"` — current as of `bsky-saves` v0.7.0.
+`protocol = "2"` — current as of `bsky-saves` v0.6.2.
 ```
 
 - [ ] **Step 5.3: Add `### Pairing` subsection to `README.md`**
@@ -943,7 +943,7 @@ Insert under `## bsky-saves serve` (around the "endpoints" table), after the exi
 ```markdown
 ### Pairing
 
-Since v0.7.0 the helper requires a session token on every API request
+Since v0.6.2 the helper requires a session token on every API request
 (except `GET /ping`, which stays unauth so the GUI can probe whether
 the helper is running before pairing). The token lives at:
 
@@ -978,7 +978,7 @@ bsky-saves token --rotate
 Also update the `## Upgrade` section, append one line:
 
 ```markdown
-**v0.6.x → v0.7.0:** the GUI will prompt for a one-time pairing the first
+**v0.6.x → v0.6.2:** the GUI will prompt for a one-time pairing the first
 time it connects to the upgraded helper. See [Pairing](#pairing).
 ```
 
@@ -994,9 +994,9 @@ Expected: all green (no test changes; this is just docs + version).
 
 ```bash
 git add pyproject.toml docs/protocol-versioning.md README.md
-git commit -m "release(v0.7.0): version bump, protocol changelog, README pairing docs
+git commit -m "release(v0.6.2): version bump, protocol changelog, README pairing docs
 
-Bumps package to 0.7.0. Documents the session-token pairing model
+Bumps package to 0.6.2. Documents the session-token pairing model
 in README under '### Pairing' and adds an upgrade note pointing v0.6.x
 users at the one-time pairing step. Updates docs/protocol-versioning.md
 with the protocol \"1\" → \"2\" changelog entry."
@@ -1021,7 +1021,7 @@ Expected: 365+ passed, 0 failed.
 ```bash
 /tmp/venv/bin/pip install -q build
 /tmp/venv/bin/python -m build --wheel
-ls dist/bsky_saves-0.7.0-*.whl
+ls dist/bsky_saves-0.6.2-*.whl
 ```
 
 Expected: wheel built without errors.
@@ -1029,7 +1029,7 @@ Expected: wheel built without errors.
 - [ ] **Step 6.3: Install in a fresh venv and exercise `token` + `serve`**
 
 ```bash
-python3.11 -m venv /tmp/smoke && /tmp/smoke/bin/pip install -q dist/bsky_saves-0.7.0-*.whl
+python3.11 -m venv /tmp/smoke && /tmp/smoke/bin/pip install -q dist/bsky_saves-0.6.2-*.whl
 /tmp/smoke/bin/bsky-saves token
 # Expect: a base64url string printed to stdout. File created at user config dir.
 
@@ -1079,7 +1079,7 @@ ls -la ~/.config/bsky-saves/token
 git push -u origin claude/installer-prep
 ```
 
-Pushes the 5 task commits to PR #9. The PR now carries the full v0.7.0 implementation on top of the v0.6.1 + receiver-workflow content.
+Pushes the 5 task commits to PR #9. The PR now carries the full v0.6.2 implementation on top of the v0.6.1 + receiver-workflow content.
 
 ---
 
@@ -1110,4 +1110,4 @@ Pushes the 5 task commits to PR #9. The PR now carries the full v0.7.0 implement
 
 ## Execution handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-05-16-bsky-saves-v0.7.0-session-token.md`.
+Plan complete and saved to `docs/superpowers/plans/2026-05-16-bsky-saves-v0.6.2-session-token.md`.

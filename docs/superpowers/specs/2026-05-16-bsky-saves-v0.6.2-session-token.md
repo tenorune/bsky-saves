@@ -1,9 +1,9 @@
-# bsky-saves v0.7.0 — Session-token authentication for the local helper
+# bsky-saves v0.6.2 — Session-token authentication for the local helper
 
 > **Status:** approved 2026-05-16. Implementation pending.
 > **Branch:** `claude/installer-prep` in `tenorune/bsky-saves` (PR #9).
-> **Releases as:** PyPI `bsky-saves==0.7.0`. Consumers: the `bsky-saves-gui` static PWA (bundled or hosted at `https://saves.lightseed.net`).
-> **External contract:** `bsky-saves-gui/docs/bsky-saves-gui-dist-workstream.md` §3 R3 + §4 items 10–12 (origin allowlist, session token, security headers) and §4 item 11's pairing UX prose. That document is canonical for the GUI-side implementation; this document is canonical for the helper side. The two MUST agree on the meta-tag sentinel (§7), the placeholder-substitution rule (§7), the exempt-endpoint list (§5), and the protocol bump value (§9) — that agreement is the anti-drift contract for v0.7.0.
+> **Releases as:** PyPI `bsky-saves==0.6.2`. Consumers: the `bsky-saves-gui` static PWA (bundled or hosted at `https://saves.lightseed.net`).
+> **External contract:** `bsky-saves-gui/docs/bsky-saves-gui-dist-workstream.md` §3 R3 + §4 items 10–12 (origin allowlist, session token, security headers) and §4 item 11's pairing UX prose. That document is canonical for the GUI-side implementation; this document is canonical for the helper side. The two MUST agree on the meta-tag sentinel (§7), the placeholder-substitution rule (§7), the exempt-endpoint list (§5), and the protocol bump value (§9) — that agreement is the anti-drift contract for v0.6.2.
 
 ---
 
@@ -17,7 +17,7 @@ The local helper (`bsky-saves serve`) listens on `127.0.0.1` and exposes a JSON 
 
 These three layers together defeat the DNS-rebinding attack of `bsky-saves-gui:docs/bsky-saves-gui-dist-workstream.md §3 R3`: an attacker rebinding `evil.com` to `127.0.0.1` still carries `Origin: https://evil.com`, which fails the allowlist. The browser sets `Origin` from the page's origin, not from the post-rebind connection target, and there is no `fetch()` API that lets a page spoof it.
 
-v0.7.0 adds a fourth layer — **a per-installation session token** — as defense-in-depth on top of the three above. The token is the GUI side's same-machine pairing primitive: any process that can read the token file can call the helper API; any caller without the token gets `401`. The token primarily defends against:
+v0.6.2 adds a fourth layer — **a per-installation session token** — as defense-in-depth on top of the three above. The token is the GUI side's same-machine pairing primitive: any process that can read the token file can call the helper API; any caller without the token gets `401`. The token primarily defends against:
 
 - An endpoint regression that bypasses `_security_gate` (the shared dispatcher gate today; future endpoints might be added that skip it).
 - A future hypothetical browser bug or misconfiguration that allows `Origin` spoofing.
@@ -38,7 +38,7 @@ Re-pairing fires only on three cases: never-paired-on-this-machine, explicit use
 
 ## 2. Scope
 
-`bsky-saves` remains an ingestion package plus local helper daemon. v0.7.0 adds:
+`bsky-saves` remains an ingestion package plus local helper daemon. v0.6.2 adds:
 
 - a token file on disk (read by `serve`, written by `serve` lazily and by the new `token` subcommand explicitly),
 - `Authorization: Bearer <token>` enforcement on every credentialed endpoint,
@@ -77,8 +77,8 @@ Re-pairing fires only on three cases: never-paired-on-this-machine, explicit use
 | `tests/test_serve.py` | Update existing handler tests to set `Authorization: Bearer <test-token>` via a new `paired_helper` fixture. Add: token-required tests (401 on missing/wrong token), `/ping` exemption test, meta-tag substitution test, lazy-generation test, rotate test, atomic-write test. |
 | `tests/test_cli.py` (or new `tests/test_token_cli.py`) | Tests for the `token` subcommand: prints existing, lazy-generates on first call, `--rotate` produces a different value and persists. |
 | `README.md` | New "Pairing" subsection under `## bsky-saves serve`. Mention `bsky-saves token` + `--rotate`. Update the `## Upgrade` section to note re-pairing is needed on upgrade from v0.6.x. |
-| `pyproject.toml` | Bump `version = "0.7.0"`. |
-| `docs/protocol-versioning.md` | Add a "Changelog" subsection: v0.6.1 → `"1"`, v0.7.0 → `"2"` (auth requirement added to credentialed endpoints). |
+| `pyproject.toml` | Bump `version = "0.6.2"`. |
+| `docs/protocol-versioning.md` | Add a "Changelog" subsection: v0.6.1 → `"1"`, v0.6.2 → `"2"` (auth requirement added to credentialed endpoints). |
 
 ### Files created
 
@@ -209,7 +209,7 @@ Because `_security_gate` reads the token on every request, `--rotate` from a sep
 <meta name="bsky-saves-token" content="__BSKY_SAVES_TOKEN__">
 ```
 
-The sentinel string is `__BSKY_SAVES_TOKEN__`. Coordinated with the GUI side (confirmed in this v0.7.0 sequencing thread).
+The sentinel string is `__BSKY_SAVES_TOKEN__`. Coordinated with the GUI side (confirmed in this v0.6.2 sequencing thread).
 
 ### Substitution
 
@@ -271,7 +271,7 @@ Tests opt in by adding `paired_helper` to the signature and threading the return
 
 `_PROTOCOL_VERSION` in `serve.py` bumps from `"1"` to `"2"`. Per `docs/protocol-versioning.md`'s rules: "authentication requirement changes" is a non-additive bump trigger.
 
-Old GUI versions (those built against v0.6.x helpers) send no `Authorization` header. Against a v0.7.0 helper they get clean 401s on every credentialed endpoint. The GUI side's startup logic reads `protocol` from `/ping`'s response; on `protocol >= "2"` the GUI knows to require pairing before issuing requests. Cross-repo coordination: the GUI side ships its `protocol`-aware code in the GUI release that lands alongside helper v0.7.0.
+Old GUI versions (those built against v0.6.x helpers) send no `Authorization` header. Against a v0.6.2 helper they get clean 401s on every credentialed endpoint. The GUI side's startup logic reads `protocol` from `/ping`'s response; on `protocol >= "2"` the GUI knows to require pairing before issuing requests. Cross-repo coordination: the GUI side ships its `protocol`-aware code in the GUI release that lands alongside helper v0.6.2.
 
 `docs/protocol-versioning.md` gains a Changelog subsection:
 
@@ -279,7 +279,7 @@ Old GUI versions (those built against v0.6.x helpers) send no `Authorization` he
 ## Changelog
 
 - "1" — bsky-saves v0.6.1. Initial value when `protocol` was added to /ping.
-- "2" — bsky-saves v0.7.0. `Authorization: Bearer <token>` now required on all
+- "2" — bsky-saves v0.6.2. `Authorization: Bearer <token>` now required on all
   credentialed endpoints (/fetch, /fetch-image, /extract-article, /enrich,
   /hydrate-threads). /ping remains unauth.
 ```
@@ -300,13 +300,13 @@ Server-side logs do not echo the token. The `verbose` log line prints `method` a
 ### From v0.6.x
 
 - First `bsky-saves serve` after upgrading: lazy-generates the token file.
-- First request from a v0.6.x-era GUI bundle (no `Authorization` header): 401. The GUI side ships a paired v0.7.0 bundle in the same coordinated release.
-- Coordinated-release gate (per the v0.5.0 spec's vendoring model): `bsky-saves` v0.7.0's wheel bundles the v0.7.0 GUI tag. A user who `pipx upgrade`s bsky-saves to 0.7.0 gets the matching GUI automatically.
-- README's `## Upgrade` section gains a one-line note: "v0.6.x → v0.7.0 introduces pairing; the GUI will surface a pairing prompt on first connect."
+- First request from a v0.6.x-era GUI bundle (no `Authorization` header): 401. The GUI side ships a paired v0.6.2 bundle in the same coordinated release.
+- Coordinated-release gate (per the v0.5.0 spec's vendoring model): `bsky-saves` v0.6.2's wheel bundles the v0.6.2 GUI tag. A user who `pipx upgrade`s bsky-saves to 0.6.2 gets the matching GUI automatically.
+- README's `## Upgrade` section gains a one-line note: "v0.6.x → v0.6.2 introduces pairing; the GUI will surface a pairing prompt on first connect."
 
 ### Downgrades
 
-Not supported. Downgrading from v0.7.0 to v0.6.x leaves the token file in place (harmless — older versions ignore it). Re-upgrading reuses the same token.
+Not supported. Downgrading from v0.6.2 to v0.6.x leaves the token file in place (harmless — older versions ignore it). Re-upgrading reuses the same token.
 
 ## 12. Out-of-band integrations
 
@@ -333,11 +333,11 @@ This is supported and documented in the README.
 
 1. **GUI side (in parallel, can land now)**: Add `<meta name="bsky-saves-token" content="__BSKY_SAVES_TOKEN__">` to `app/index.html` and ship in a small GUI PR; the wheel build will pick it up on the next coordinated GUI tag.
 2. **Helper side (this spec)**: `_io.config_dir` + `read_or_create_token`; `_security_gate` token check; `_gui_serve` placeholder substitution; `token` CLI; tests; README; doc updates.
-3. **Doc side (GUI repo, standalone, can land now)**: §4 items 10–12 corrections per the v0.7.0 sequencing thread (CSP `'wasm-unsafe-eval'` retained, `--allow-origin` flag name, `/ping` exemption captured, persistent-secret design).
-4. **Coordinated release**: tag `bsky-saves-gui v0.7.0` (carries the placeholder + paired-mode startup logic), bump `gui_version` + `gui-dist.sha256` in `bsky-saves` (via the `gui-version-bump` workflow from PR #9), tag `bsky-saves v0.7.0` (PyPI release).
+3. **Doc side (GUI repo, standalone, can land now)**: §4 items 10–12 corrections per the v0.6.2 sequencing thread (CSP `'wasm-unsafe-eval'` retained, `--allow-origin` flag name, `/ping` exemption captured, persistent-secret design).
+4. **Coordinated release**: tag `bsky-saves-gui v0.6.2` (carries the placeholder + paired-mode startup logic), bump `gui_version` + `gui-dist.sha256` in `bsky-saves` (via the `gui-version-bump` workflow from PR #9), tag `bsky-saves v0.6.2` (PyPI release).
 
 The gui-version-bump workflow is now load-bearing: step 4 is the first release that exercises the end-to-end auto-bump loop.
 
 ## 14. Open questions
 
-None as of approval (2026-05-16). The four push-back points from the v0.7.0 sequencing thread are all resolved.
+None as of approval (2026-05-16). The four push-back points from the v0.6.2 sequencing thread are all resolved.

@@ -45,7 +45,7 @@ If `bsky-saves serve` is currently running, restart it after upgrading so
 the new helper version takes effect — the GUI's outdated-helper banner
 keeps showing until the running daemon reports the upgraded version.
 
-**v0.6.x → v0.7.0:** the GUI will prompt for a one-time pairing the first
+**v0.6.x → v0.6.2:** the GUI will prompt for a one-time pairing the first
 time it connects to the upgraded helper. See [Pairing](#pairing).
 
 ## Authenticate
@@ -151,7 +151,7 @@ replacing.
 
 ### Pairing
 
-Since v0.7.0 the helper requires a session token on every API request
+Since v0.6.2 the helper requires a session token on every API request
 (except `GET /ping`, which stays unauth so the GUI can probe whether
 the helper is running before pairing). The token lives at:
 
