@@ -12,6 +12,7 @@ https://github.com/tenorune/bsky-saves-gui/blob/main/docs/bsky-saves-serve-requi
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -26,6 +27,7 @@ import httpx
 from . import __version__
 from .articles import _extract_article
 from .auth import create_session, refresh_session
+from ._io import read_or_create_token
 from ._net import UnsafeURLError, assert_public_http_url, safe_http_get
 from .fetch import (
     ENDPOINT_IDS,
@@ -49,14 +51,6 @@ _BODY_REJECTED: object = object()    # Sentinel for "413 already sent."
 
 # Bump rules: docs/protocol-versioning.md
 _PROTOCOL_VERSION = "2"
-
-# Routes that bypass token authentication. /ping is the pre-pairing
-# diagnostic surface (probeHelper reads it before the GUI has any
-# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §5.
-EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset({
-    ("GET", "/ping"),
-})
-
 
 def _bundled_gui_version() -> str | None:
     """Return the version of the bsky-saves-gui bundle vendored into this
@@ -442,6 +436,13 @@ ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("POST", "/hydrate-threads"): _handle_hydrate_threads,
 }
 
+# Routes that bypass token authentication. /ping is the pre-pairing
+# diagnostic surface (probeHelper reads it before the GUI has any
+# token); see docs/superpowers/specs/2026-05-16-bsky-saves-v0.7.0-session-token.md §5.
+EXEMPT_ROUTES: frozenset[tuple[str, str]] = frozenset({
+    ("GET", "/ping"),
+})
+
 
 class _HandlerLike:
     """Type stub for request handlers. The real type is the class returned by
@@ -704,9 +705,6 @@ def make_handler(
             GET/HEAD, path is not in ROUTES) also bypass — the GUI loads
             index.html before it can read the meta tag, and static assets
             contain no user data."""
-            from ._io import read_or_create_token
-            import hmac
-
             if method == "OPTIONS":
                 return True
             if (method, self.path) in EXEMPT_ROUTES:

@@ -2104,9 +2104,9 @@ def test_responses_include_cache_control_no_store():
     assert headers["Cache-Control"] == "no-store"
 
 
-def test_error_responses_include_security_headers():
+def test_error_responses_include_security_headers(paired_helper):
     with serve_in_background() as (port, _):
-        _, headers, _ = _request(port, "/does-not-exist")
+        _, headers, _ = _request(port, "/does-not-exist", headers=_auth_headers(paired_helper))
     assert headers["X-Content-Type-Options"] == "nosniff"
     assert headers["Cache-Control"] == "no-store"
 
