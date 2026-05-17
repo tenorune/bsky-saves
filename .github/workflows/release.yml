@@ -22,6 +22,14 @@ jobs:
     permissions:
       id-token: write
 
+    # Surfaced to the dispatch-bump job below so it can fire a
+    # wheel-version-bump repository_dispatch at tenorune/bsky-saves-install
+    # (the installer repo) with the exact wheel metadata.
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      sha256: ${{ steps.metadata.outputs.sha256 }}
+      wheel_url: ${{ steps.wheel_url.outputs.wheel_url }}
+
     steps:
       - uses: actions/checkout@v5
 
@@ -34,5 +42,97 @@ jobs:
           pip install build
           python -m build
 
+      - name: Compute wheel metadata
+        id: metadata
+        run: |
+          set -euo pipefail
+          REF_NAME='${{ github.ref_name }}'
+          VERSION="${REF_NAME#v}"
+          WHEEL_FILE=$(ls dist/bsky_saves-*-py3-none-any.whl)
+          SHA=$(sha256sum "$WHEEL_FILE" | awk '{print $1}')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Wheel: $WHEEL_FILE"
+          echo "Version: $VERSION"
+          echo "SHA-256: $SHA"
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Resolve wheel URL on PyPI
+        id: wheel_url
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.metadata.outputs.version }}'
+          # Poll PyPI's JSON API until the new version is indexed. There's
+          # typically a brief delay (seconds) between upload-accept and
+          # the JSON API reflecting it; retry up to ~60s.
+          URL=""
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            if RESOLVED=$(curl -fsS "https://pypi.org/pypi/bsky-saves/${VERSION}/json" 2>/dev/null | python3 -c "
+          import sys, json
+          try:
+              d = json.load(sys.stdin)
+          except Exception:
+              sys.exit(1)
+          for f in d.get('urls', []):
+              if f.get('packagetype') == 'bdist_wheel':
+                  print(f['url'])
+                  sys.exit(0)
+          sys.exit(1)
+          " 2>/dev/null) && [ -n "$RESOLVED" ]; then
+              URL="$RESOLVED"
+              break
+            fi
+            echo "PyPI not yet reflecting bsky-saves==${VERSION}, retrying in 5s..."
+            sleep 5
+          done
+          if [ -z "$URL" ]; then
+            echo "::error::Could not resolve wheel URL for bsky-saves==${VERSION} on PyPI after 60s"
+            exit 1
+          fi
+          echo "wheel_url=$URL" >> "$GITHUB_OUTPUT"
+          echo "Resolved URL: $URL"
+
+  # After publish succeeds, fire a repository_dispatch at
+  # tenorune/bsky-saves-install so its wheel-version-bump.yml can open an
+  # auto-PR bumping the installer's wheel pin + sha256 to the new release.
+  # Mirrors the bsky-saves-gui → bsky-saves gui-version-bump pattern,
+  # outbound this time. Skips with ::warning:: if the dispatch PAT isn't
+  # set, so this side can be wired in independently of the installer side.
+  dispatch-bump:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Check dispatch token
+        id: pat
+        env:
+          PAT: ${{ secrets.BSKY_SAVES_INSTALL_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::warning::BSKY_SAVES_INSTALL_DISPATCH_TOKEN not set; skipping wheel-version-bump dispatch to bsky-saves-install. Set the secret to enable auto-bump PRs on the installer side."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dispatch wheel-version-bump to bsky-saves-install
+        if: steps.pat.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.BSKY_SAVES_INSTALL_DISPATCH_TOKEN }}
+          VERSION: ${{ needs.publish.outputs.version }}
+          SHA: ${{ needs.publish.outputs.sha256 }}
+          WHEEL_URL: ${{ needs.publish.outputs.wheel_url }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          gh api repos/tenorune/bsky-saves-install/dispatches \
+            -X POST \
+            -f event_type='wheel-version-bump' \
+            -f "client_payload[version]=${VERSION}" \
+            -f "client_payload[sha256]=${SHA}" \
+            -f "client_payload[wheel_url]=${WHEEL_URL}" \
+            -f "client_payload[ref_name]=${REF_NAME}"
+          echo "Dispatched wheel-version-bump for ${REF_NAME} to bsky-saves-install."
