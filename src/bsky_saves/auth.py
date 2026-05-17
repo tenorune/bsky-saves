@@ -5,6 +5,8 @@ import sys
 
 import httpx
 
+from ._net import bsky_ssl_context
+
 
 class ServiceAuthError(Exception):
     """The PDS refused to issue a service-auth token (likely scope-restricted
@@ -25,6 +27,7 @@ def create_session(pds_base: str, handle: str, app_password: str) -> dict:
         f"{pds_base.rstrip('/')}/xrpc/com.atproto.server.createSession",
         json={"identifier": handle, "password": app_password},
         timeout=30.0,
+        verify=bsky_ssl_context(),
     )
     if r.status_code >= 400:
         try:
@@ -53,6 +56,7 @@ def get_service_auth(pds_base: str, session: dict, aud: str, lxm: str) -> str:
         params={"aud": aud, "lxm": lxm},
         headers=headers,
         timeout=30.0,
+        verify=bsky_ssl_context(),
     )
     if r.status_code >= 400:
         try:
@@ -81,6 +85,7 @@ def refresh_session(pds_base: str, refresh_jwt: str) -> dict:
         f"{pds_base.rstrip('/')}/xrpc/com.atproto.server.refreshSession",
         headers={"Authorization": f"Bearer {refresh_jwt}"},
         timeout=30.0,
+        verify=bsky_ssl_context(),
     )
     if r.status_code >= 400:
         try:

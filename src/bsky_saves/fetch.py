@@ -23,6 +23,7 @@ from typing import Callable
 import httpx
 
 from ._io import atomic_write_inventory
+from ._net import bsky_ssl_context
 from .auth import ServiceAuthError, create_session, get_service_auth
 from .normalize import merge_into_inventory, normalise_record
 
@@ -196,6 +197,7 @@ def probe_bookmark_endpoints(
                     params=params,
                     headers=headers,
                     timeout=30.0,
+                    verify=bsky_ssl_context(),
                 )
                 body: object = None
                 is_error = r.status_code >= 400
@@ -285,6 +287,7 @@ def list_repo_collections(session: dict, *, pds_base: str) -> list[str]:
         params={"repo": session["did"]},
         headers=headers,
         timeout=30.0,
+        verify=bsky_ssl_context(),
     )
     r.raise_for_status()
     data = r.json()
@@ -434,6 +437,7 @@ def fetch_one_page(
                 params=params,
                 headers=headers,
                 timeout=30.0,
+                verify=bsky_ssl_context(),
             )
         except Exception as e:
             tried.append(f"{eid}:{type(e).__name__}")

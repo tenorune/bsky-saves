@@ -212,3 +212,85 @@ def test_safe_http_get_too_many_redirects():
     )
     with pytest.raises(TooManyRedirectsError):
         safe_http_get("https://example.com/a", max_redirects=2)
+
+
+# --- v0.6.5: bsky_ssl_context cipher-reorder workaround for the WAF block ---
+
+
+def test_bsky_ssl_context_returns_sslcontext_with_custom_ciphers():
+    """bsky_ssl_context returns a valid SSLContext whose cipher list reflects
+    the documented workaround set (not the OpenSSL 3.0.x default that the
+    bsky.social WAF blocks)."""
+    import ssl
+    from bsky_saves._net import bsky_ssl_context, _BSKY_CIPHERS
+
+    ctx = bsky_ssl_context()
+    assert isinstance(ctx, ssl.SSLContext)
+    # The configured cipher list should be a strict subset of _BSKY_CIPHERS
+    # (the runtime OpenSSL may not support every named cipher; that's fine
+    # as long as it supports some). Spot-check at least one cipher is present.
+    configured_names = {c["name"] for c in ctx.get_ciphers()}
+    requested_names = set(_BSKY_CIPHERS.split(":"))
+    assert configured_names & requested_names, (
+        f"none of the requested ciphers were configured. configured={configured_names!r}"
+    )
+
+
+def test_bsky_ssl_context_handles_unknown_cipher_gracefully(monkeypatch):
+    """If the runtime OpenSSL doesn't recognise the cipher list (hypothetical
+    exotic build), bsky_ssl_context falls through to the unmodified default
+    context rather than crashing. The user on that build would still hit the
+    WAF 403, but doesn't get an unrecoverable startup error."""
+    import ssl
+    from bsky_saves import _net
+
+    monkeypatch.setattr(_net, "_BSKY_CIPHERS", "NOT_A_REAL_CIPHER_THAT_OPENSSL_KNOWS")
+    ctx = _net.bsky_ssl_context()
+    assert isinstance(ctx, ssl.SSLContext)
+
+
+def test_safe_http_get_defaults_verify_to_bsky_ssl_context(monkeypatch):
+    """Regression guard against silently dropping the cipher-context override:
+    safe_http_get should default the `verify` kwarg to a bsky_ssl_context()
+    instance, not to True. If a future refactor changes this, the WAF
+    workaround stops protecting calls that go through _net (articles, images
+    via safe_http_get + redirects)."""
+    import ssl
+    from bsky_saves._net import safe_http_get
+
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["kwargs"] = kwargs
+        return httpx.Response(200, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    # Bypass the SSRF assertion (we don't care for this test).
+    monkeypatch.setattr("bsky_saves._net.assert_public_http_url", lambda *a, **k: None)
+
+    safe_http_get("https://example.com/")
+    assert isinstance(captured["kwargs"].get("verify"), ssl.SSLContext), (
+        f"expected SSLContext, got {captured['kwargs'].get('verify')!r}"
+    )
+
+
+def test_auth_create_session_passes_bsky_ssl_context(monkeypatch):
+    """Regression guard: auth.create_session must thread an SSLContext into
+    httpx.post. Without it, the WAF blocks the sign-in call on OpenSSL-3.0.x
+    Pythons (see tenorune/bsky-saves#19)."""
+    import ssl
+    from bsky_saves import auth
+
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["kwargs"] = kwargs
+        return httpx.Response(
+            200,
+            json={"accessJwt": "x", "refreshJwt": "y", "did": "did:plc:z", "handle": "x.example"},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    auth.create_session("https://bsky.social", "alice.bsky.social", "xxxx-xxxx-xxxx-xxxx")
+    assert isinstance(captured["kwargs"].get("verify"), ssl.SSLContext)
