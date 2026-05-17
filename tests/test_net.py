@@ -249,6 +249,24 @@ def test_bsky_ssl_context_handles_unknown_cipher_gracefully(monkeypatch):
     assert isinstance(ctx, ssl.SSLContext)
 
 
+def test_bsky_ssl_context_loads_ca_bundle():
+    """Regression guard for tenorune/bsky-saves#19 follow-up: bsky_ssl_context
+    must load certifi's CA bundle explicitly. Without it, ssl.create_default_context()
+    finds nothing in environments where the runtime ssl module has no
+    OS-level CA path configured (Briefcase bundles, Alpine containers,
+    PyInstaller-frozen apps, slim Docker images) — and httpx, when passed
+    verify=<SSLContext>, does NOT auto-load certifi the way it does with
+    verify=True. The context must be self-sufficient. Assert the cert store
+    contains many certs (certifi ships ~150)."""
+    from bsky_saves._net import bsky_ssl_context
+
+    ctx = bsky_ssl_context()
+    stats = ctx.cert_store_stats()
+    # certifi ships ~150 root CAs; assert we've got at least a handful so a
+    # future "oops we dropped certifi" regression fires loudly.
+    assert stats["x509"] > 10, f"expected populated CA store, got {stats}"
+
+
 def test_safe_http_get_defaults_verify_to_bsky_ssl_context(monkeypatch):
     """Regression guard against silently dropping the cipher-context override:
     safe_http_get should default the `verify` kwarg to a bsky_ssl_context()

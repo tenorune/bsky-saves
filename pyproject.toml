@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bsky-saves"
-version = "0.6.5"
+version = "0.6.6"
 description = "BlueSky bookmarks ingestion toolkit: fetch, hydrate (article text, self-thread context, images), and merge into a JSON inventory."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -22,6 +22,11 @@ classifiers = [
 ]
 dependencies = [
   "httpx>=0.27",
+  # certifi is transitively required by httpx, but we import it directly in
+  # _net.bsky_ssl_context() to load CAs for the cipher-overridden SSLContext
+  # (httpx doesn't auto-load certifi when verify= is an SSLContext). Declare
+  # it explicitly so future httpx changes can't silently break us.
+  "certifi",
   "trafilatura>=2.0.0",
   # justext (a trafilatura dependency) imports lxml.html.clean, which lxml
   # >=5.2 split into a separately-packaged project; neither justext nor
