@@ -3,15 +3,59 @@
 Centralises SSRF defence: every user-supplied URL flows through
 ``assert_public_http_url`` before httpx ever sees it. ``safe_http_get`` wraps
 ``httpx.get`` to walk redirects manually with the guard re-applied per hop.
+
+Also provides ``bsky_ssl_context()`` — a workaround for AWS WAF on
+``bsky.social`` blocking the JA3 produced by Python stdlib ``ssl``'s default
+cipher list under OpenSSL 3.0.x. See tenorune/bsky-saves#19. The cipher list
+is from tenorune/bsky-saves-install v0.1.2 (@ebd55c0), verified against the
+WAF (post-patch JA3 ``48b8472f8c6c7e3e91b544381d8b4d62`` is accepted).
 """
 from __future__ import annotations
 
 import ipaddress
 import socket
+import ssl
 from collections.abc import Callable
 from urllib.parse import urljoin, urlparse
 
 import httpx
+
+
+# AWS WAF on bsky.social blocks the JA3 produced by Python stdlib ssl's
+# default cipher list under OpenSSL 3.0.x. Shipping this non-default order
+# produces a different JA3 the WAF accepts. Exact ciphers don't matter much
+# beyond "not OpenSSL 3.0.x's default"; this set is verified against the
+# current WAF rules by the bsky-saves-install team. If a future WAF update
+# blocks this JA3 too, swap the cipher list and reverify.
+_BSKY_CIPHERS = (
+    "TLS_AES_128_GCM_SHA256:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_256_GCM_SHA384:"
+    "ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:"
+    "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384"
+)
+
+
+def bsky_ssl_context() -> ssl.SSLContext:
+    """Return a default SSLContext with the bsky-saves cipher list set.
+
+    Workaround for the AWS WAF rule on bsky.social that blocks the JA3
+    produced by Python stdlib ssl's default cipher list under OpenSSL 3.0.x
+    (tenorune/bsky-saves#19). Reordering ciphers produces a different JA3
+    that the WAF accepts.
+
+    Falls through to the unmodified default context if the runtime OpenSSL
+    doesn't recognise one of the named ciphers — strictly better failure
+    mode than crashing on startup, and the user just sees the original
+    WAF 403 instead of an unrecoverable error.
+    """
+    ctx = ssl.create_default_context()
+    try:
+        ctx.set_ciphers(_BSKY_CIPHERS)
+    except ssl.SSLError:
+        # Hypothetical exotic OpenSSL build missing one of the named ciphers.
+        # User on this build may still hit the WAF 403, but they don't suffer
+        # an unrecoverable startup crash from this workaround itself.
+        pass
+    return ctx
 
 
 class UnsafeURLError(ValueError):
@@ -126,6 +170,7 @@ def safe_http_get(
         TooManyRedirectsError: more than ``max_redirects`` 3xx responses chained.
     """
     httpx_kwargs.pop("follow_redirects", None)  # we follow manually
+    httpx_kwargs.setdefault("verify", bsky_ssl_context())
     current = url
     for _ in range(max_redirects + 1):
         if hop_check is not None:

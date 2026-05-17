@@ -30,6 +30,7 @@ import httpx
 
 from . import __version__
 from ._io import atomic_write_inventory
+from ._net import bsky_ssl_context
 from .normalize import extract_media
 
 # Bump this when the thread_replies schema changes; entries whose stored
@@ -69,6 +70,7 @@ def fetch_thread(
             params={"uri": uri},
             headers={"User-Agent": user_agent},
             timeout=TIMEOUT,
+            verify=bsky_ssl_context(),
         )
     except Exception as e:
         return None, f"fetch_error:{type(e).__name__}:{str(e)[:120]}"
