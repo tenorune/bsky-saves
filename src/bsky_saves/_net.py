@@ -35,25 +35,43 @@ _BSKY_CIPHERS = (
 
 
 def bsky_ssl_context() -> ssl.SSLContext:
-    """Return a default SSLContext with the bsky-saves cipher list set.
+    """Return an SSLContext with the bsky-saves cipher list configured and
+    certifi's CA bundle loaded.
 
-    Workaround for the AWS WAF rule on bsky.social that blocks the JA3
-    produced by Python stdlib ssl's default cipher list under OpenSSL 3.0.x
-    (tenorune/bsky-saves#19). Reordering ciphers produces a different JA3
-    that the WAF accepts.
+    Two layers of context configuration in one place:
 
-    Falls through to the unmodified default context if the runtime OpenSSL
-    doesn't recognise one of the named ciphers — strictly better failure
-    mode than crashing on startup, and the user just sees the original
-    WAF 403 instead of an unrecoverable error.
+    1. **Cipher list** — workaround for the AWS WAF rule on bsky.social that
+       blocks the JA3 produced by Python stdlib ssl's default cipher list
+       under OpenSSL 3.0.x (tenorune/bsky-saves#19). Reordering ciphers
+       produces a different JA3 the WAF accepts. Falls through to the
+       default cipher list if the runtime OpenSSL doesn't recognise one of
+       the named ciphers — strictly better failure mode than crashing on
+       startup.
+    2. **Certifi CA bundle** — loaded explicitly via ``cafile=certifi.where()``.
+       Without this, ``ssl.create_default_context()`` falls back to whatever
+       OS-level CA path the runtime ssl module is configured with, which is
+       absent in Briefcase bundles, Alpine containers, PyInstaller-frozen
+       apps, slim Docker images, and any other minimal-runtime environment.
+       Verification fails with ``CERTIFICATE_VERIFY_FAILED`` in those
+       contexts unless certifi is loaded directly. httpx loads certifi
+       automatically when ``verify=True``, but by passing
+       ``verify=<SSLContext>`` for the cipher override we opt out of that
+       automatic loading and have to do it ourselves.
+
+    certifi is a transitive dependency of httpx (declared in
+    ``pyproject.toml`` as a direct dep too for clarity, since we now import
+    it directly here).
     """
-    ctx = ssl.create_default_context()
+    import certifi
+
+    ctx = ssl.create_default_context(cafile=certifi.where())
     try:
         ctx.set_ciphers(_BSKY_CIPHERS)
     except ssl.SSLError:
         # Hypothetical exotic OpenSSL build missing one of the named ciphers.
-        # User on this build may still hit the WAF 403, but they don't suffer
-        # an unrecoverable startup crash from this workaround itself.
+        # User on this build keeps cert verification (since we still loaded
+        # certifi) but loses the cipher-reorder protection against any
+        # future WAF rule.
         pass
     return ctx
 
