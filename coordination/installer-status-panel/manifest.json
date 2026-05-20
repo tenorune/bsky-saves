@@ -1,0 +1,9 @@
+{
+  "title": "CLI revision: answer Q5–Q7, restore §4.7 security model, raise Q9 (missing resolved.md)",
+  "files": [
+    {
+      "source": "coordination/installer-status-panel/installer-status-panel.md",
+      "target": "docs/installer-status-panel.md"
+    }
+  ]
+}
