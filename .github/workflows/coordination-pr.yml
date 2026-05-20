@@ -1,0 +1,203 @@
+name: Coordination PR
+
+# Pushes one or more coordination artifacts from this repo's
+# `coordination` branch into `tenorune/bsky-saves-coordination` as a
+# single PR. Designed for the multi-team coordination flow where each
+# primary repo drafts amendments locally and the canonical contract
+# lives in the neutral coordination repo.
+#
+# Manual trigger. Run from the Actions tab → "Coordination PR" →
+# "Run workflow". You provide ONE input: the path to a JSON manifest
+# on the coordination branch that lists the files to PR and the PR
+# title. The workflow reads the manifest, copies each listed source
+# into its target on a fresh coord-repo branch, single-commits, opens
+# one PR.
+#
+# Manifest format (JSON):
+#   {
+#     "title": "PR title here",
+#     "files": [
+#       { "source": "coordination/foo/a.md", "target": "docs/a.md" },
+#       { "source": "coordination/foo/b.md", "target": "docs/b.md" }
+#     ]
+#   }
+#
+# Secret required: BSKY_SAVES_COORDINATION_TOKEN (fine-grained PAT
+# scoped to `tenorune/bsky-saves-coordination`, with Contents:
+# read-and-write and Pull requests: read-and-write). When unset the
+# workflow logs a warning and exits 0 — no failing red-X on the
+# Actions tab.
+
+on:
+  workflow_dispatch:
+    inputs:
+      manifest:
+        description: 'Path on the coordination branch to a JSON manifest listing files to push and the PR title. Example: coordination/installer-status-panel/manifest.json'
+        required: true
+        type: string
+      source_ref:
+        description: 'Branch in this repo to read source files (and the manifest) from. Defaults to the dedicated coordination branch.'
+        required: false
+        type: string
+        default: coordination
+      base:
+        description: 'Base branch in the coord repo to PR against.'
+        required: false
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  open-coordination-pr:
+    runs-on: ubuntu-latest
+    env:
+      # Job-level so step `if:` expressions can read it. Same pattern
+      # as cross-repo release dispatch tokens.
+      COORD_TOKEN: ${{ secrets.BSKY_SAVES_COORDINATION_TOKEN }}
+    steps:
+      - name: Check secret presence
+        if: env.COORD_TOKEN == ''
+        run: |
+          echo "::warning::BSKY_SAVES_COORDINATION_TOKEN is unset. Configure it as a repo secret to enable cross-repo coordination PRs."
+          echo "Skipping PR step. See the coord repo's README for setup."
+          exit 0
+
+      - name: Sanitize inputs (strip leading/trailing whitespace)
+        if: env.COORD_TOKEN != ''
+        id: clean
+        run: |
+          mft='${{ inputs.manifest }}'
+          sref='${{ inputs.source_ref }}'
+          bse='${{ inputs.base }}'
+          trim() { printf '%s' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+          {
+            echo "manifest=$(trim "$mft")"
+            echo "source_ref=$(trim "$sref")"
+            echo "base=$(trim "$bse")"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout this repo (coordination branch)
+        if: env.COORD_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.clean.outputs.source_ref }}
+          path: source-repo
+
+      - name: Read and validate manifest
+        if: env.COORD_TOKEN != ''
+        id: manifest
+        run: |
+          MFT="source-repo/${{ steps.clean.outputs.manifest }}"
+          if [ ! -f "$MFT" ]; then
+            echo "::error::Manifest file not found: ${{ steps.clean.outputs.manifest }}"
+            exit 1
+          fi
+          if ! jq empty "$MFT" 2>/dev/null; then
+            echo "::error::Manifest is not valid JSON: ${{ steps.clean.outputs.manifest }}"
+            exit 1
+          fi
+          TITLE="$(jq -r '.title // ""' "$MFT")"
+          if [ -z "$TITLE" ]; then
+            echo "::error::Manifest missing required field: title"
+            exit 1
+          fi
+          FILES_COUNT="$(jq -r '.files | length' "$MFT")"
+          if [ "$FILES_COUNT" -eq 0 ]; then
+            echo "::error::Manifest field 'files' is empty"
+            exit 1
+          fi
+          # Validate each source path resolves to a non-empty file.
+          while IFS= read -r src; do
+            if [ ! -f "source-repo/$src" ]; then
+              echo "::error::Source file in manifest not found: $src"
+              exit 1
+            fi
+            if [ ! -s "source-repo/$src" ]; then
+              echo "::error::Source file in manifest is empty: $src"
+              exit 1
+            fi
+          done < <(jq -r '.files[].source' "$MFT")
+          # Expose title and file count for downstream steps.
+          {
+            echo "title<<__TITLE_EOF__"
+            printf '%s\n' "$TITLE"
+            echo "__TITLE_EOF__"
+            echo "files_count=$FILES_COUNT"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Checkout coordination repo
+        if: env.COORD_TOKEN != ''
+        uses: actions/checkout@v4
+        with:
+          repository: tenorune/bsky-saves-coordination
+          token: ${{ env.COORD_TOKEN }}
+          path: coord-repo
+          ref: ${{ steps.clean.outputs.base }}
+
+      - name: Apply changes and push branch
+        if: env.COORD_TOKEN != ''
+        working-directory: coord-repo
+        env:
+          PRIMARY_REPO_SHORT: ${{ github.event.repository.name }}
+          MANIFEST_PATH: ${{ steps.clean.outputs.manifest }}
+          TITLE: ${{ steps.manifest.outputs.title }}
+        run: |
+          BRANCH="${PRIMARY_REPO_SHORT}/coordination-${GITHUB_RUN_ID}"
+          git config user.name "${GITHUB_REPOSITORY} coordination workflow"
+          git config user.email "${{ github.actor }}@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          MFT="../source-repo/${MANIFEST_PATH}"
+          # Iterate every (source, target) pair. Tab-separated so paths
+          # with embedded spaces work; jq emits a single tab between
+          # the two values.
+          jq -r '.files[] | "\(.source)\t\(.target)"' "$MFT" | while IFS=$'\t' read -r src tgt; do
+            mkdir -p "$(dirname "$tgt")"
+            cp "../source-repo/$src" "$tgt"
+            git add "$tgt"
+          done
+          if git diff --cached --quiet; then
+            echo "::warning::No effective changes — all source files match existing canonicals. Aborting PR creation."
+            exit 0
+          fi
+          git commit -m "$TITLE"
+          git push -u origin "$BRANCH"
+          echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
+
+      - name: Open PR via gh
+        if: env.COORD_TOKEN != '' && env.BRANCH != ''
+        working-directory: coord-repo
+        env:
+          GH_TOKEN: ${{ env.COORD_TOKEN }}
+          MANIFEST_PATH: ${{ steps.clean.outputs.manifest }}
+          TITLE: ${{ steps.manifest.outputs.title }}
+          FILES_COUNT: ${{ steps.manifest.outputs.files_count }}
+          BASE: ${{ steps.clean.outputs.base }}
+        run: |
+          MFT="../source-repo/${MANIFEST_PATH}"
+          FILES_TABLE="$(
+            echo "| Source (this repo) | Target (coord repo) |"
+            echo "|---|---|"
+            jq -r '.files[] | "| `\(.source)` | `\(.target)` |"' "$MFT"
+          )"
+          BODY="$(cat <<EOF
+          Opened automatically by ${GITHUB_REPOSITORY}'s coordination workflow.
+
+          **Manifest:** [\`${MANIFEST_PATH}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${GITHUB_SHA}/${MANIFEST_PATH}) in ${GITHUB_REPOSITORY} @ \`${GITHUB_SHA}\`
+
+          **Files in this PR (${FILES_COUNT}):**
+
+          ${FILES_TABLE}
+
+          **Workflow run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          See the cross-repo coordination process in the coord repo's README for context.
+          EOF
+          )"
+          gh pr create \
+            --repo tenorune/bsky-saves-coordination \
+            --base "$BASE" \
+            --head "$BRANCH" \
+            --title "$TITLE" \
+            --body "$BODY"
