@@ -183,6 +183,22 @@ suspect the token leaked):
 bsky-saves token --rotate
 ```
 
+### Status snapshot (v0.6.7+)
+
+The helper exposes three credentialed endpoints for the installer's status panel to display library state without opening the GUI:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST`   | `/status` | Publish a library snapshot (the GUI pushes this). |
+| `GET`    | `/status` | Read the latest snapshot. `200` with JSON or `404` if no snapshot exists. |
+| `DELETE` | `/status` | Clear the snapshot (the GUI calls this from "Settings → Clear all data"). |
+
+The snapshot lives in helper memory and (in `persist` mode) is mirrored to `<config_dir>/bsky-saves/status.json` (sibling of the token file, `0600` perms). In `session` mode it's memory-only with a per-push TTL — the helper drops the snapshot if the GUI stops pushing heartbeats. Disk writes in persist mode are coalesced to at most one per second; the GUI can request a synchronous flush by sending `"priority": "final"` in the payload (used on `beforeunload` so terminal state lands on disk before tab close).
+
+Auth: same `Authorization: Bearer <token>` as every other credentialed endpoint. No protocol bump — the endpoints are additive.
+
+Full cross-repo contract: [`bsky-saves-coordination:docs/installer-status-panel.md`](https://github.com/tenorune/bsky-saves-coordination/blob/main/docs/installer-status-panel.md). Helper-side implementation spec: [`docs/superpowers/specs/2026-05-21-bsky-saves-v0.6.7-status-endpoints.md`](docs/superpowers/specs/2026-05-21-bsky-saves-v0.6.7-status-endpoints.md).
+
 ### `--gui` mode
 
 Pass `--gui` to also mount the bundled `bsky-saves-gui` static bundle at
