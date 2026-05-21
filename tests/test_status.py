@@ -2,6 +2,7 @@
 behind /status endpoints."""
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -101,3 +102,59 @@ def test_last_write_wins_under_sequential_pushes(monkeypatch, tmp_path):
     _status.receive_push(p1)
     _status.receive_push(p2)
     assert _status.read_snapshot() == p2
+
+
+def test_load_disk_on_startup_populates_disk_snapshot(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    # Pre-write a snapshot file.
+    path = tmp_path / "status.json"
+    payload = _valid_persist_payload()
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    _status.load_disk_on_startup()
+    assert _status.read_snapshot() == payload
+
+
+def test_load_disk_on_startup_handles_missing_file(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    # No file at tmp_path/status.json.
+    _status.load_disk_on_startup()
+    assert _status.read_snapshot() is None
+
+
+def test_load_disk_on_startup_handles_corrupt_file(monkeypatch, tmp_path, capsys):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    path = tmp_path / "status.json"
+    path.write_text("not valid json {", encoding="utf-8")
+    _status.load_disk_on_startup()
+    assert _status.read_snapshot() is None
+    captured = capsys.readouterr()
+    assert "failed to load" in captured.err.lower()
+
+
+def test_load_disk_on_startup_is_idempotent(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    path = tmp_path / "status.json"
+    payload1 = _valid_persist_payload(handle="alice.bsky.social")
+    path.write_text(json.dumps(payload1), encoding="utf-8")
+    _status.load_disk_on_startup()
+    # Overwrite the file; second load_disk_on_startup should not pick up the change.
+    payload2 = _valid_persist_payload(handle="bob.bsky.social")
+    path.write_text(json.dumps(payload2), encoding="utf-8")
+    _status.load_disk_on_startup()
+    # Still the first payload — load is idempotent.
+    assert _status.read_snapshot() == payload1
+
+
+def test_delete_snapshot_removes_disk_file(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    path = tmp_path / "status.json"
+    path.write_text(json.dumps(_valid_persist_payload()), encoding="utf-8")
+    _status.load_disk_on_startup()
+    assert path.exists()
+    _status.delete_snapshot()
+    assert not path.exists()

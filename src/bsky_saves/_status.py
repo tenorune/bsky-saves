@@ -16,7 +16,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from ._io import atomic_write_status, config_dir
+from . import _io
+from ._io import atomic_write_status
 
 
 _FLUSH_DEBOUNCE_SECONDS = 1.0
@@ -42,7 +43,7 @@ _disk_snapshot: Snapshot | None = None
 
 
 def _status_path() -> Path:
-    return config_dir() / "status.json"
+    return _io.config_dir() / "status.json"
 
 
 def receive_push(body: dict) -> None:
@@ -105,6 +106,42 @@ def delete_snapshot() -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def load_disk_on_startup() -> None:
+    """Read <config_dir>/bsky-saves/status.json into _disk_snapshot if present.
+
+    Called once by run_serve at helper startup. Idempotent — subsequent
+    calls are no-ops (we don't want to clobber an in-memory snapshot that
+    was pushed AFTER the helper started but BEFORE someone called this
+    function a second time).
+
+    Malformed disk file (missing, non-JSON, non-dict, etc.) is logged as a
+    warning to stderr and treated as "no disk snapshot." The file is NOT
+    auto-deleted — operator can inspect.
+    """
+    global _disk_snapshot, _disk_loaded
+    if _disk_loaded:
+        return
+    _disk_loaded = True
+    path = _status_path()
+    if not path.exists():
+        return
+    try:
+        text = path.read_text(encoding="utf-8")
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            print(
+                f"bsky-saves: warning: {path} did not parse as a JSON object; ignoring",
+                file=sys.stderr,
+            )
+            return
+        _disk_snapshot = Snapshot(payload=payload, received_at=0.0)
+    except (OSError, json.JSONDecodeError) as e:
+        print(
+            f"bsky-saves: warning: failed to load {path}: {e}",
+            file=sys.stderr,
+        )
 
 
 def _schedule_coalesced_flush() -> None:
