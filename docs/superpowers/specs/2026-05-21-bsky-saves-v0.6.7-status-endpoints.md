@@ -193,7 +193,7 @@ _memory_expires_at: float = 0.0       # time.monotonic() value; 0 means "no expi
 _disk_loaded: bool = False
 _disk_snapshot: Snapshot | None = None
 _flush_pending = False
-_last_flush_at: float = 0.0           # time.monotonic() of last successful disk write
+_flush_timer: threading.Timer | None = None  # The pending Timer (if any) for the coalesced flush.
 _flush_lock = threading.Lock()        # Protects flush coordination state separate from _lock.
 ```
 
@@ -235,8 +235,9 @@ On POST /status with storage.mode == "persist":
     Update _memory_snapshot under _lock.
 
     If priority == "final":
-        Synchronously flush to disk under _flush_lock.
-        Set _last_flush_at = monotonic().
+        Synchronously flush to disk (acquires _flush_lock across the write).
+        Cancel any pending Timer so a stale background flush can't fire
+        ~1s later with a redundant write.
         Return 204.
 
     Else (default coalesced):
@@ -246,11 +247,19 @@ On POST /status with storage.mode == "persist":
                 It will pick up the latest _memory_snapshot when it fires.
             Else:
                 _flush_pending = True.
-                Schedule a Timer to fire at max(0, _last_flush_at + 1.0 - monotonic()).
-                Timer callback writes to disk, updates _last_flush_at,
-                clears _flush_pending.
+                Schedule a Timer to fire after _FLUSH_DEBOUNCE_SECONDS (1.0s).
+                Timer callback writes to disk and clears _flush_pending.
         Return 204.
 ```
+
+The Timer fires after a fixed `_FLUSH_DEBOUNCE_SECONDS` (1.0s) from
+scheduling. Subsequent pushes within that window are coalesced via
+`_flush_pending` (the existing timer absorbs the latest snapshot when
+it fires). This is slightly more conservative than a
+`last_flush + DEBOUNCE - now` formula in the burst-after-quiet case
+but preserves the "≤1 disk write per second" invariant and avoids a
+cold-start bug (where `_last_flush_at == 0.0` would collapse the
+computed delay to zero, defeating coalescing on the very first push).
 
 This guarantees:
 
@@ -263,11 +272,9 @@ This guarantees:
 
 `run_serve`'s `finally` block calls `_status.flush_synchronously()` before `server.shutdown()`. The flush:
 
-1. Acquires `_flush_lock`.
-2. Cancels any pending Timer (best-effort; the Timer may already be running).
-3. Reads the current `_memory_snapshot` under `_lock`.
-4. If the snapshot exists and is newer than the on-disk copy (compare `received_at`), writes it via `atomic_write_status`.
-5. Updates `_last_flush_at`.
+1. Reads the current `_memory_snapshot` under `_lock`.
+2. If the snapshot is session-mode, returns immediately (privacy contract).
+3. Otherwise, acquires `_flush_lock` and writes the snapshot via `atomic_write_status`, then cancels any pending Timer (no-op if it has already fired).
 
 The shutdown flush is synchronous — `run_serve` doesn't return until disk reflects the latest in-memory state. This makes shutdown the only guaranteed flush boundary in addition to `priority: "final"`.
 

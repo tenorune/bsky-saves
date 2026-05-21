@@ -78,9 +78,16 @@ def receive_push(body: dict) -> None:
         _memory_expires_at = 0.0  # No expiry in persist mode.
 
     # Persist-mode flush: synchronous on priority="final", else coalesced.
-    if body.get("priority") == "final":
+    # Unknown priority values are logged and treated as default per spec §5.
+    priority = body.get("priority")
+    if priority == "final":
         _flush_to_disk_synchronously(snap)
     else:
+        if priority is not None and priority != "":
+            print(
+                f"bsky-saves: warning: unknown priority {priority!r}; treating as default",
+                file=sys.stderr,
+            )
         _schedule_coalesced_flush()
 
 
@@ -178,6 +185,9 @@ def load_disk_on_startup() -> None:
                 file=sys.stderr,
             )
             return
+        # received_at=0.0 is a sentinel for "loaded from disk, no monotonic
+        # reference." Nothing compares received_at for ordering today; the
+        # value exists for diagnostic logging and future use.
         _disk_snapshot = Snapshot(payload=payload, received_at=0.0)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         print(

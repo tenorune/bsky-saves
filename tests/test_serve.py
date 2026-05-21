@@ -3064,3 +3064,52 @@ def test_run_serve_loads_disk_snapshot_on_startup(paired_helper, reset_status_mo
     assert status == 200
     got = json.loads(resp_body)
     assert got["library"]["handle"] == "loaded-from-disk.bsky.social"
+
+
+def test_post_status_500_on_disk_write_failure(paired_helper, reset_status_module, monkeypatch):
+    """A disk-write failure during priority='final' returns 500, not TCP reset."""
+    from bsky_saves import _status
+
+    def boom(*a, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(_status, "atomic_write_status", boom)
+    body = _valid_status_payload()
+    body["priority"] = "final"
+    with serve_in_background() as (port, _server):
+        status, _h, resp_body = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 500
+    payload = json.loads(resp_body)
+    assert "disk" in payload["error"].lower()
+
+
+def test_post_status_400_on_bool_total_saves(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["library"]["total_saves"] = True
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 400
+
+
+def test_post_status_400_on_bool_session_ttl(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["storage"]["mode"] = "session"
+    body["storage"]["session_ttl_seconds"] = True
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 400

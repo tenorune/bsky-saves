@@ -463,7 +463,7 @@ def _validate_status_payload(body: dict) -> str | None:
     if not isinstance(lib.get("did"), str) or not lib["did"].startswith("did:"):
         return "missing or invalid field: library.did"
     ts = lib.get("total_saves")
-    if not isinstance(ts, int) or ts < 0:
+    if not isinstance(ts, int) or isinstance(ts, bool) or ts < 0:
         return "missing or invalid field: library.total_saves"
     storage = body.get("storage")
     if not isinstance(storage, dict):
@@ -473,7 +473,7 @@ def _validate_status_payload(body: dict) -> str | None:
         return f"invalid storage.mode: {mode!r}"
     if mode == "session":
         ttl = storage.get("session_ttl_seconds")
-        if not isinstance(ttl, int) or ttl <= 0:
+        if not isinstance(ttl, int) or isinstance(ttl, bool) or ttl <= 0:
             return "session mode requires positive storage.session_ttl_seconds"
     else:
         ttl = storage.get("session_ttl_seconds")
@@ -494,7 +494,16 @@ def _handle_status_post(handler) -> None:
         handler._send_json_error(400, err)
         return
     from . import _status
-    _status.receive_push(body)
+    try:
+        _status.receive_push(body)
+    except OSError as e:
+        # Disk write failure during priority='final' synchronous flush
+        # (or any other OSError surfacing through receive_push). Return a
+        # clean JSON 500 instead of letting the exception propagate and
+        # close the connection with a TCP reset. Use type(e).__name__ to
+        # avoid leaking absolute paths to the GUI client.
+        handler._send_json_error(500, f"disk write failed: {type(e).__name__}")
+        return
     handler.send_response(204)
     handler.send_header("Content-Length", "0")
     handler._cors_headers()
