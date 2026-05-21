@@ -306,6 +306,93 @@ def test_priority_final_flushes_synchronously(monkeypatch, tmp_path):
     assert written == payload
 
 
+def test_priority_final_cancels_pending_timer(monkeypatch, tmp_path):
+    """A priority='final' push must cancel any pending background Timer
+    so the spec's '<=1 disk write per second' invariant isn't violated by
+    a redundant write firing ~1s after the synchronous write."""
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    # First push schedules a Timer (non-priority).
+    p1 = _valid_persist_payload()
+    p1["library"]["total_saves"] = 100
+    _status.receive_push(p1)
+    # Second push uses priority='final' — should cancel the pending Timer.
+    p2 = _valid_persist_payload()
+    p2["library"]["total_saves"] = 200
+    p2["priority"] = "final"
+    _status.receive_push(p2)
+    path = tmp_path / "status.json"
+    assert path.exists()
+    # Read the file content after priority=final synchronous write.
+    written_first = json.loads(path.read_text(encoding="utf-8"))
+    assert written_first["library"]["total_saves"] == 200
+    # Snapshot the file mtime, sleep past the debounce window, and re-check.
+    # If the Timer wasn't cancelled, _do_flush will fire and rewrite the same
+    # snapshot, bumping mtime.
+    mtime_before = path.stat().st_mtime_ns
+    time.sleep(1.3)
+    mtime_after = path.stat().st_mtime_ns
+    assert mtime_after == mtime_before, (
+        f"Disk file was rewritten by a stale Timer ({mtime_before} -> {mtime_after})"
+    )
+
+
+def test_delete_during_priority_final_flush_does_not_resurrect_file(monkeypatch, tmp_path):
+    """A delete racing a priority='final' flush must not resurrect the file.
+
+    The priority='final' path runs the flush synchronously from the HTTP
+    request thread, NOT the Timer thread, so the Task 4 cancel+join fix
+    doesn't drain it. The fix: _flush_to_disk_synchronously takes
+    _flush_lock across the entire write, and delete_snapshot also takes
+    _flush_lock around the unlink — so the two serialize.
+    """
+    import threading
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+
+    # Block atomic_write_status to pin the flusher mid-write.
+    block_event = threading.Event()
+    flush_started_event = threading.Event()
+    real_write = _io.atomic_write_status
+
+    def blocking_write(path, body):
+        flush_started_event.set()
+        block_event.wait(timeout=5.0)
+        real_write(path, body)
+
+    monkeypatch.setattr(_status, "atomic_write_status", blocking_write)
+
+    payload = _valid_persist_payload()
+    payload["priority"] = "final"
+
+    def push():
+        _status.receive_push(payload)
+
+    pusher = threading.Thread(target=push, daemon=True)
+    pusher.start()
+
+    # Wait until the flush has entered atomic_write_status (so it's
+    # already holding _flush_lock per the Fix 2 contract).
+    assert flush_started_event.wait(timeout=5.0), "flush never started"
+
+    # Now try to delete concurrently. delete_snapshot should block on
+    # _flush_lock until the flush completes, then unlink.
+    def delete():
+        _status.delete_snapshot()
+
+    deleter = threading.Thread(target=delete, daemon=True)
+    deleter.start()
+
+    # Let the flush proceed (the deleter is blocked on _flush_lock).
+    block_event.set()
+    pusher.join(timeout=5.0)
+    deleter.join(timeout=5.0)
+
+    path = tmp_path / "status.json"
+    assert not path.exists(), "delete was resurrected by an in-flight priority=final flush"
+    assert _status.read_snapshot() is None
+
+
 def test_session_mode_ignores_priority_final(monkeypatch, tmp_path):
     """priority='final' must not trigger a disk write in session mode —
     the privacy contract is "session never touches disk regardless"."""

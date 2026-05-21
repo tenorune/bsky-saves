@@ -109,9 +109,10 @@ def read_snapshot() -> dict | None:
 def delete_snapshot() -> None:
     """Drop the in-memory snapshot and the on-disk mirror.
 
-    Cancels any pending flush Timer and waits briefly for an in-flight
-    flush to complete (so a concurrent _do_flush can't resurrect the
-    deleted file). Idempotent.
+    Cancels any pending flush Timer, waits briefly for an in-flight
+    Timer flush to complete, takes _flush_lock to serialize with any
+    in-flight priority='final' flush, then unlinks the file last so
+    a racing write cannot survive past us. Idempotent.
     """
     global _memory_snapshot, _memory_expires_at, _disk_snapshot
     global _flush_pending, _flush_timer
@@ -127,21 +128,26 @@ def delete_snapshot() -> None:
         # we unlink — otherwise it could rewrite the file after delete.
         timer.join(timeout=2.0)
 
-    # Step 2: clear memory state. Any _do_flush still running was drained
-    # by the join() above; any that hadn't started will see this None and
-    # abort in its own re-read under _lock.
+    # Step 2: clear memory state. Any flush that already captured a
+    # snapshot but hadn't yet written would now see _memory_snapshot=None
+    # if it re-reads... but it doesn't re-read. The locking below is what
+    # drains the priority='final' race.
     with _lock:
         _memory_snapshot = None
         _memory_expires_at = 0.0
 
-    # Step 3: clear disk snapshot pointer and unlink the file LAST so a
-    # racing write (already drained above) cannot survive past us.
-    _disk_snapshot = None
-    path = _status_path()
-    try:
-        path.unlink()
-    except FileNotFoundError:
-        pass
+    # Step 3: serialize with any in-flight priority='final' flush via
+    # _flush_lock, then clear disk snapshot pointer and unlink the file.
+    # Holding _flush_lock here means an in-progress _flush_to_disk_synchronously
+    # call (which now holds _flush_lock across atomic_write_status) blocks
+    # us until it finishes — then we unlink the file it just wrote.
+    with _flush_lock:
+        _disk_snapshot = None
+        path = _status_path()
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def load_disk_on_startup() -> None:
@@ -219,15 +225,29 @@ def _do_flush() -> None:
 def _flush_to_disk_synchronously(snap: Snapshot) -> None:
     """Write the snapshot's payload to disk now.
 
-    Updates _disk_snapshot. Called from the Timer callback AND from the
-    `priority: "final"` path AND from shutdown (Task 5).
+    Called from three sites: the background Timer callback (_do_flush),
+    the priority='final' synchronous path in receive_push, and the
+    shutdown hook (flush_synchronously). Holds _flush_lock across the
+    entire write — including the atomic_write_status call — so a
+    concurrent delete_snapshot blocks until the write completes, then
+    proceeds to unlink the just-written file. Without this, a
+    priority='final' POST racing a 'Clear all data' DELETE could
+    silently resurrect the deleted file.
+
+    Also cancels any pending _flush_timer so a stale background Timer
+    can't fire ~1s later with a redundant write and violate the
+    "<=1 disk write per second" invariant across the priority='final'
+    boundary. cancel() is a no-op for an already-fired Timer (the
+    _do_flush call site).
     """
     global _disk_snapshot, _flush_pending, _flush_timer
     body = (json.dumps(snap.payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    atomic_write_status(_status_path(), body)
     with _flush_lock:
+        atomic_write_status(_status_path(), body)
         _disk_snapshot = snap
         _flush_pending = False
+        if _flush_timer is not None:
+            _flush_timer.cancel()
         _flush_timer = None
 
 
