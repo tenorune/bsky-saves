@@ -128,8 +128,8 @@ def load_disk_on_startup() -> None:
     if not path.exists():
         return
     try:
-        text = path.read_text(encoding="utf-8")
-        payload = json.loads(text)
+        body = path.read_bytes()
+        payload = json.loads(body)
         if not isinstance(payload, dict):
             print(
                 f"bsky-saves: warning: {path} did not parse as a JSON object; ignoring",
@@ -137,7 +137,7 @@ def load_disk_on_startup() -> None:
             )
             return
         _disk_snapshot = Snapshot(payload=payload, received_at=0.0)
-    except (OSError, json.JSONDecodeError) as e:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         print(
             f"bsky-saves: warning: failed to load {path}: {e}",
             file=sys.stderr,

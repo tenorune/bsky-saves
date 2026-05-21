@@ -134,6 +134,34 @@ def test_load_disk_on_startup_handles_corrupt_file(monkeypatch, tmp_path, capsys
     assert "failed to load" in captured.err.lower()
 
 
+def test_load_disk_on_startup_handles_non_dict_json(monkeypatch, tmp_path, capsys):
+    """A JSON array (or any non-object) is rejected with a distinct warning,
+    leaving _disk_snapshot empty. File is not auto-deleted."""
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    path = tmp_path / "status.json"
+    path.write_text("[1, 2, 3]", encoding="utf-8")
+    _status.load_disk_on_startup()
+    assert _status.read_snapshot() is None
+    assert path.exists()  # not auto-deleted
+    captured = capsys.readouterr()
+    assert "did not parse as a json object" in captured.err.lower()
+
+
+def test_load_disk_on_startup_handles_non_utf8_bytes(monkeypatch, tmp_path, capsys):
+    """A file with invalid UTF-8 bytes is treated as a corrupt file —
+    stderr warning, no crash, _disk_snapshot stays empty."""
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    path = tmp_path / "status.json"
+    # Lone 0x80 byte is invalid as start of a UTF-8 sequence.
+    path.write_bytes(b"\x80\x81\x82 not valid utf-8")
+    _status.load_disk_on_startup()
+    assert _status.read_snapshot() is None
+    captured = capsys.readouterr()
+    assert "failed to load" in captured.err.lower()
+
+
 def test_load_disk_on_startup_is_idempotent(monkeypatch, tmp_path):
     from bsky_saves import _status, _io
     monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
