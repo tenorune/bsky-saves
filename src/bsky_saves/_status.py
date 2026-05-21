@@ -44,7 +44,6 @@ _disk_snapshot: Snapshot | None = None
 _flush_lock = threading.Lock()
 _flush_pending: bool = False
 _flush_timer: threading.Timer | None = None
-_last_flush_at: float = 0.0
 # Locking note: `_disk_snapshot` is read in `read_snapshot()` and reassigned
 # in `delete_snapshot()` without `_flush_lock`. CPython's GIL serializes the
 # single-pointer load/store, so observers see either the old or the new
@@ -98,22 +97,45 @@ def read_snapshot() -> dict | None:
                 _memory_expires_at = 0.0
         if _memory_snapshot is not None:
             return _memory_snapshot.payload
-    # Fall back to disk if loaded (added in Task 3).
-    if _disk_snapshot is not None:
-        return _disk_snapshot.payload
+    # Fall back to disk if loaded (added in Task 3). Bind to a local before
+    # dereferencing so a concurrent delete_snapshot setting _disk_snapshot=None
+    # between the None-check and the .payload access can't AttributeError.
+    disk = _disk_snapshot
+    if disk is not None:
+        return disk.payload
     return None
 
 
 def delete_snapshot() -> None:
-    """Drop the in-memory snapshot and (Task 3+) the on-disk mirror.
+    """Drop the in-memory snapshot and the on-disk mirror.
 
-    Idempotent.
+    Cancels any pending flush Timer and waits briefly for an in-flight
+    flush to complete (so a concurrent _do_flush can't resurrect the
+    deleted file). Idempotent.
     """
     global _memory_snapshot, _memory_expires_at, _disk_snapshot
+    global _flush_pending, _flush_timer
+
+    # Step 1: cancel pending Timer and capture any in-flight one for join.
+    with _flush_lock:
+        _flush_pending = False
+        timer = _flush_timer
+        _flush_timer = None
+    if timer is not None:
+        timer.cancel()
+        # If _do_flush is already running, wait for it to finish before
+        # we unlink — otherwise it could rewrite the file after delete.
+        timer.join(timeout=2.0)
+
+    # Step 2: clear memory state. Any _do_flush still running was drained
+    # by the join() above; any that hadn't started will see this None and
+    # abort in its own re-read under _lock.
     with _lock:
         _memory_snapshot = None
         _memory_expires_at = 0.0
-    # Disk-side cleanup added in Task 3.
+
+    # Step 3: clear disk snapshot pointer and unlink the file LAST so a
+    # racing write (already drained above) cannot survive past us.
     _disk_snapshot = None
     path = _status_path()
     try:
@@ -172,10 +194,7 @@ def _schedule_coalesced_flush() -> None:
         _flush_pending = True
         # Always defer by the full debounce window. This gives subsequent
         # pushes a coalescing window AND naturally caps disk writes at one
-        # per _FLUSH_DEBOUNCE_SECONDS. (Earlier draft used
-        # `_last_flush_at + DEBOUNCE - now`, but on the first-ever push
-        # `_last_flush_at == 0.0` made delay collapse to 0, so the timer
-        # would fire before subsequent pushes could land in memory.)
+        # per _FLUSH_DEBOUNCE_SECONDS.
         delay = _FLUSH_DEBOUNCE_SECONDS
         _flush_timer = threading.Timer(delay, _do_flush)
         _flush_timer.daemon = True
@@ -200,14 +219,13 @@ def _do_flush() -> None:
 def _flush_to_disk_synchronously(snap: Snapshot) -> None:
     """Write the snapshot's payload to disk now.
 
-    Updates _last_flush_at and _disk_snapshot. Called from the Timer callback
-    AND from the `priority: "final"` path AND from shutdown (Task 5).
+    Updates _disk_snapshot. Called from the Timer callback AND from the
+    `priority: "final"` path AND from shutdown (Task 5).
     """
-    global _last_flush_at, _disk_snapshot, _flush_pending, _flush_timer
+    global _disk_snapshot, _flush_pending, _flush_timer
     body = (json.dumps(snap.payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     atomic_write_status(_status_path(), body)
     with _flush_lock:
-        _last_flush_at = time.monotonic()
         _disk_snapshot = snap
         _flush_pending = False
         _flush_timer = None
@@ -217,15 +235,22 @@ def _reset_for_tests() -> None:
     """Test-only: clear all module state."""
     global _memory_snapshot, _memory_expires_at
     global _disk_snapshot, _disk_loaded
-    global _flush_pending, _flush_timer, _last_flush_at
+    global _flush_pending, _flush_timer
+
+    # Snapshot and cancel the live timer outside the lock so we can join it
+    # without holding _flush_lock (which _do_flush also needs to take).
+    with _flush_lock:
+        timer = _flush_timer
+        _flush_timer = None
+        _flush_pending = False
+    if timer is not None:
+        timer.cancel()
+        # Drain any already-fired-but-still-running Timer thread so it can't
+        # write to a tmp_path that the next test has torn down.
+        timer.join(timeout=2.0)
+
     with _lock:
         _memory_snapshot = None
         _memory_expires_at = 0.0
-    with _flush_lock:
-        _disk_snapshot = None
-        _disk_loaded = False
-        _flush_pending = False
-        if _flush_timer is not None:
-            _flush_timer.cancel()
-        _flush_timer = None
-        _last_flush_at = 0.0
+    _disk_snapshot = None
+    _disk_loaded = False

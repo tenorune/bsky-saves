@@ -189,6 +189,86 @@ def test_delete_snapshot_removes_disk_file(monkeypatch, tmp_path):
     assert not path.exists()
 
 
+def test_delete_during_pending_flush_does_not_resurrect_file(monkeypatch, tmp_path):
+    """Pending Timer should not resurrect the file after a concurrent delete.
+
+    Verifies the cancel+join hazard fix: a delete while a flush is mid-flight
+    (atomic_write_status running) must leave the disk file gone, not let the
+    flush recreate it.
+
+    To exercise the race deterministically, we monkeypatch atomic_write_status
+    to block on an event. We fire _do_flush() on a background thread; while it
+    is blocked inside atomic_write_status, we call delete_snapshot() on the
+    main thread. delete_snapshot must wait for the in-flight flush to drain
+    (join the timer/thread) and then unlink the file last, so the final
+    on-disk state is "no file."
+    """
+    import threading as _threading
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+
+    payload = _valid_persist_payload()
+    _status.receive_push(payload)  # schedules a Timer (~1s out)
+
+    # Capture the real writer so we can call it inside our blocking shim.
+    real_write = _status.atomic_write_status
+
+    write_started = _threading.Event()
+    release_write = _threading.Event()
+
+    def blocking_write(path, body):
+        write_started.set()
+        # Hold the flush mid-execution until the main thread releases us.
+        release_write.wait(timeout=5.0)
+        real_write(path, body)
+
+    monkeypatch.setattr(_status, "atomic_write_status", blocking_write)
+
+    # Cancel the auto-Timer and drive _do_flush ourselves via a controlled
+    # Timer so we can deterministically place delete_snapshot in the race
+    # window. We use a real threading.Timer (with a tiny delay) rather than a
+    # plain Thread so delete_snapshot's .cancel()+.join() calls work — on an
+    # already-fired Timer, cancel() is a no-op and join() drains the thread.
+    with _status._flush_lock:
+        t = _status._flush_timer
+    if t is not None:
+        t.cancel()
+    flush_timer = _threading.Timer(0.0, _status._do_flush)
+    flush_timer.daemon = True
+    # Register the new Timer as _flush_timer so delete_snapshot drains it.
+    with _status._flush_lock:
+        _status._flush_timer = flush_timer
+        _status._flush_pending = True
+    flush_timer.start()
+    # Wait until the flush is mid-write (inside atomic_write_status).
+    assert write_started.wait(timeout=3.0), "flush never entered atomic_write_status"
+
+    # Now call delete_snapshot. It must:
+    #   1. cancel/clear timer state,
+    #   2. wait for the in-flight flush to finish writing the file,
+    #   3. unlink the file LAST.
+    # Release the blocked write *after* a tiny delay, so delete_snapshot's
+    # join() is what blocks until the write completes.
+    def releaser():
+        time.sleep(0.1)
+        release_write.set()
+    _threading.Thread(target=releaser, daemon=True).start()
+
+    _status.delete_snapshot()
+
+    # Wait for the in-flight flush to fully finish so we can observe the
+    # final on-disk state. In the FIXED code, delete_snapshot itself
+    # already drained the flush via join() before unlinking, so the file is
+    # gone. In the BUGGY code, delete_snapshot returned before the racing
+    # write completed, and the write then resurrected the file.
+    flush_timer.join(timeout=3.0)
+    assert not flush_timer.is_alive(), "flush thread did not finish"
+
+    path = tmp_path / "status.json"
+    assert not path.exists(), "delete was resurrected by an in-flight flush"
+    assert _status.read_snapshot() is None
+
+
 def test_persist_push_writes_to_disk(monkeypatch, tmp_path):
     from bsky_saves import _status, _io
     monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
