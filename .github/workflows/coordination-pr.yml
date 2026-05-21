@@ -11,7 +11,7 @@ name: Coordination PR
 # on the coordination branch that lists the files to PR and the PR
 # title. The workflow reads the manifest, copies each listed source
 # into its target on a fresh coord-repo branch, single-commits, opens
-# one PR.
+# one PR via REST.
 #
 # Manifest format (JSON):
 #   {
@@ -53,8 +53,7 @@ jobs:
   open-coordination-pr:
     runs-on: ubuntu-latest
     env:
-      # Job-level so step `if:` expressions can read it. Same pattern
-      # as cross-repo release dispatch tokens.
+      # Job-level so step `if:` expressions can read it.
       COORD_TOKEN: ${{ secrets.BSKY_SAVES_COORDINATION_TOKEN }}
     steps:
       - name: Check secret presence
@@ -108,7 +107,6 @@ jobs:
             echo "::error::Manifest field 'files' is empty"
             exit 1
           fi
-          # Validate each source path resolves to a non-empty file.
           while IFS= read -r src; do
             if [ ! -f "source-repo/$src" ]; then
               echo "::error::Source file in manifest not found: $src"
@@ -119,7 +117,6 @@ jobs:
               exit 1
             fi
           done < <(jq -r '.files[].source' "$MFT")
-          # Expose title and file count for downstream steps.
           {
             echo "title<<__TITLE_EOF__"
             printf '%s\n' "$TITLE"
@@ -149,9 +146,6 @@ jobs:
           git config user.email "${{ github.actor }}@users.noreply.github.com"
           git checkout -b "$BRANCH"
           MFT="../source-repo/${MANIFEST_PATH}"
-          # Iterate every (source, target) pair. Tab-separated so paths
-          # with embedded spaces work; jq emits a single tab between
-          # the two values.
           jq -r '.files[] | "\(.source)\t\(.target)"' "$MFT" | while IFS=$'\t' read -r src tgt; do
             mkdir -p "$(dirname "$tgt")"
             cp "../source-repo/$src" "$tgt"
@@ -165,16 +159,20 @@ jobs:
           git push -u origin "$BRANCH"
           echo "BRANCH=$BRANCH" >> "$GITHUB_ENV"
 
-      - name: Open PR via gh
+      - name: Open PR via REST API
         if: env.COORD_TOKEN != '' && env.BRANCH != ''
         working-directory: coord-repo
         env:
-          GH_TOKEN: ${{ env.COORD_TOKEN }}
           MANIFEST_PATH: ${{ steps.clean.outputs.manifest }}
           TITLE: ${{ steps.manifest.outputs.title }}
           FILES_COUNT: ${{ steps.manifest.outputs.files_count }}
           BASE: ${{ steps.clean.outputs.base }}
         run: |
+          # Direct REST POST /repos/.../pulls instead of `gh pr create`.
+          # gh's PR-create path runs 3–5 GraphQL operations per call;
+          # the REST endpoint is one call, one point, and uses a
+          # separate REST budget. Same observable behavior; the response
+          # gives us the html_url to log.
           MFT="../source-repo/${MANIFEST_PATH}"
           FILES_TABLE="$(
             echo "| Source (this repo) | Target (coord repo) |"
@@ -195,9 +193,19 @@ jobs:
           See the cross-repo coordination process in the coord repo's README for context.
           EOF
           )"
-          gh pr create \
-            --repo tenorune/bsky-saves-coordination \
-            --base "$BASE" \
-            --head "$BRANCH" \
-            --title "$TITLE" \
-            --body "$BODY"
+          PAYLOAD="$(jq -n \
+            --arg title "$TITLE" \
+            --arg head "$BRANCH" \
+            --arg base "$BASE" \
+            --arg body "$BODY" \
+            '{title: $title, head: $head, base: $base, body: $body}')"
+          RESPONSE="$(curl -fsSL -X POST \
+            -H "Authorization: Bearer ${COORD_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "https://api.github.com/repos/tenorune/bsky-saves-coordination/pulls")"
+          PR_URL="$(echo "$RESPONSE" | jq -r '.html_url')"
+          echo "::notice::Coordination PR opened: $PR_URL"
+          echo "$PR_URL"
