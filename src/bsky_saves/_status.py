@@ -231,6 +231,23 @@ def _flush_to_disk_synchronously(snap: Snapshot) -> None:
         _flush_timer = None
 
 
+def flush_synchronously() -> None:
+    """Called from run_serve's shutdown hook.
+
+    Drains the in-memory snapshot to disk if it's persist-mode and present.
+    Session-mode snapshots are NOT flushed — the privacy contract is
+    preserved even on graceful shutdown. No-op if memory is empty.
+    """
+    with _lock:
+        snap = _memory_snapshot
+        if snap is None:
+            return
+        is_session = (_memory_expires_at != 0.0)
+    if is_session:
+        return  # Session mode never writes to disk, even on shutdown.
+    _flush_to_disk_synchronously(snap)
+
+
 def _reset_for_tests() -> None:
     """Test-only: clear all module state."""
     global _memory_snapshot, _memory_expires_at

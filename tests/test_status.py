@@ -347,3 +347,39 @@ def test_disk_file_has_0o600_perms_after_flush(monkeypatch, tmp_path):
     perms = path.stat().st_mode & 0o777
     if sys.platform != "win32":
         assert perms == 0o600, oct(perms)
+
+
+def test_flush_synchronously_writes_pending_in_memory(monkeypatch, tmp_path):
+    """In-memory persist-mode snapshot that hasn't been flushed yet gets
+    drained to disk by flush_synchronously."""
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    # Stub the timer to avoid the background flush firing during the test.
+    monkeypatch.setattr(_status, "_schedule_coalesced_flush", lambda: None)
+    payload = _valid_persist_payload()
+    _status.receive_push(payload)
+    path = tmp_path / "status.json"
+    # Pre-condition: no disk write yet (timer was stubbed).
+    assert not path.exists()
+    _status.flush_synchronously()
+    assert path.exists()
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == payload
+
+
+def test_flush_synchronously_no_op_when_memory_empty(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    _status.flush_synchronously()
+    assert not (tmp_path / "status.json").exists()
+
+
+def test_flush_synchronously_skips_session_mode(monkeypatch, tmp_path):
+    """Session-mode in-memory snapshot should NOT be drained on shutdown."""
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    payload = _valid_session_payload(ttl_seconds=60)
+    _status.receive_push(payload)
+    _status.flush_synchronously()
+    # No disk write; the privacy contract is preserved on shutdown.
+    assert not (tmp_path / "status.json").exists()
