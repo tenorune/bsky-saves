@@ -948,6 +948,11 @@ def run_serve(
     except OSError as e:
         print(f"bsky-saves: failed to bind 127.0.0.1:{port}: {e}", file=sys.stderr)
         return 2
+    # v0.6.7: load any persisted status snapshot from disk before accepting
+    # requests. Subsequent GET /status calls will return this until a fresh
+    # push overwrites.
+    from . import _status
+    _status.load_disk_on_startup()
     _maybe_print_first_time_pairing(gui=gui)
     print(
         f"bsky-saves serve listening on http://127.0.0.1:{port} "
@@ -959,6 +964,10 @@ def run_serve(
     except KeyboardInterrupt:
         pass
     finally:
+        # v0.6.7: drain the in-memory persist-mode snapshot to disk before
+        # exit. Session-mode snapshots are deliberately skipped (privacy
+        # contract preserved on shutdown). No-op if memory is empty.
+        _status.flush_synchronously()
         server.shutdown()
         server.server_close()
     return 0

@@ -51,6 +51,10 @@ def serve_in_background(allow_origins=(), verbose=False, gui=False):
     )
     server.RequestHandlerClass = handler_cls
     thread = threading.Thread(target=server.serve_forever, daemon=True)
+    # Mirror run_serve's startup hook so tests see the same behavior
+    # the CLI does on `bsky-saves serve`.
+    from bsky_saves import _status
+    _status.load_disk_on_startup()
     thread.start()
     try:
         yield port, server
@@ -3037,3 +3041,26 @@ def test_persist_disk_file_has_0o600_perms(paired_helper, reset_status_module):
     if sys.platform != "win32":
         perms = path.stat().st_mode & 0o777
         assert perms == 0o600, oct(perms)
+
+
+def test_run_serve_loads_disk_snapshot_on_startup(paired_helper, reset_status_module, tmp_path):
+    """A pre-existing status.json on disk is visible via GET /status
+    after the helper starts (before any in-memory push)."""
+    from bsky_saves import _status
+    # Pre-write a status file BEFORE serve starts.
+    payload = _valid_status_payload(handle="loaded-from-disk.bsky.social")
+    path = reset_status_module / "status.json"  # tmp_path/bsky-saves/status.json
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    # _status hasn't been told to load it yet; reset_status_module already
+    # called _reset_for_tests at fixture setup, so _disk_loaded is False.
+    with serve_in_background() as (port, _server):
+        # The serve_in_background context should have called
+        # _status.load_disk_on_startup at startup. GET /status now returns it.
+        status, _h, resp_body = _request(
+            port, "/status",
+            method="GET",
+            headers=_auth_headers(paired_helper),
+        )
+    assert status == 200
+    got = json.loads(resp_body)
+    assert got["library"]["handle"] == "loaded-from-disk.bsky.social"
