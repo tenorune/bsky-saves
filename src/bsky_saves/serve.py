@@ -696,7 +696,7 @@ def make_handler(
             origin = self.headers.get("Origin", "")
             if origin and origin in origins:
                 self.send_header("Access-Control-Allow-Origin", origin)
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
             self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
             # Exposes WWW-Authenticate so cross-origin GUI JS can distinguish
             # a pairing-401 (header present) from an upstream-cause 401

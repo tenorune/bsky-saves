@@ -202,9 +202,29 @@ def test_options_preflight_returns_204_with_cors():
     assert status == 204
     assert body == b""
     assert headers["Access-Control-Allow-Origin"] == DEFAULT_ORIGIN
-    assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+    assert headers["Access-Control-Allow-Methods"] == "GET, POST, DELETE, OPTIONS"
     assert headers["Access-Control-Allow-Headers"] == "Content-Type, Authorization"
     assert headers["Access-Control-Max-Age"] == "600"
+
+
+def test_options_preflight_advertises_delete():
+    """OPTIONS preflight to /status must advertise DELETE in Allow-Methods
+    so the browser permits the GUI's 'Clear all data' DELETE /status call."""
+    with serve_in_background() as (port, _):
+        status, headers, _ = _request(
+            port, "/status",
+            method="OPTIONS",
+            headers={
+                "Origin": DEFAULT_ORIGIN,
+                "Access-Control-Request-Method": "DELETE",
+            },
+        )
+    assert status == 204
+    methods = headers.get("Access-Control-Allow-Methods", "")
+    assert "DELETE" in methods, methods
+    assert "GET" in methods
+    assert "POST" in methods
+    assert "OPTIONS" in methods
 
 
 def test_cors_allowed_origin_echoed_on_normal_response():
