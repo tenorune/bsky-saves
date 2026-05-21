@@ -3,6 +3,7 @@ behind /status endpoints."""
 from __future__ import annotations
 
 import json
+import sys
 import time
 
 import pytest
@@ -186,3 +187,83 @@ def test_delete_snapshot_removes_disk_file(monkeypatch, tmp_path):
     assert path.exists()
     _status.delete_snapshot()
     assert not path.exists()
+
+
+def test_persist_push_writes_to_disk(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    payload = _valid_persist_payload()
+    _status.receive_push(payload)
+    # Wait for the coalesced flush to fire (debounce window ~1s).
+    time.sleep(1.3)
+    path = tmp_path / "status.json"
+    assert path.exists()
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == payload
+
+
+def test_session_push_does_not_write_to_disk(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    payload = _valid_session_payload(ttl_seconds=60)
+    _status.receive_push(payload)
+    time.sleep(1.3)
+    path = tmp_path / "status.json"
+    assert not path.exists()
+
+
+def test_priority_final_flushes_synchronously(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    payload = _valid_persist_payload()
+    payload["priority"] = "final"
+    _status.receive_push(payload)
+    # No sleep — synchronous flush means the file should exist by the time
+    # receive_push returns.
+    path = tmp_path / "status.json"
+    assert path.exists()
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written == payload
+
+
+def test_session_mode_ignores_priority_final(monkeypatch, tmp_path):
+    """priority='final' must not trigger a disk write in session mode —
+    the privacy contract is "session never touches disk regardless"."""
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    payload = _valid_session_payload(ttl_seconds=60)
+    payload["priority"] = "final"
+    _status.receive_push(payload)
+    time.sleep(0.3)
+    path = tmp_path / "status.json"
+    assert not path.exists()
+
+
+def test_coalesced_flush_bounds_writes(monkeypatch, tmp_path):
+    """Many pushes in quick succession produce at most one disk write per
+    1-second window."""
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    # Fire 10 pushes in rapid succession.
+    for i in range(10):
+        payload = _valid_persist_payload()
+        payload["library"]["total_saves"] = 100 + i
+        _status.receive_push(payload)
+    time.sleep(1.3)
+    # Disk got at most one write in that window; final state matches last push.
+    path = tmp_path / "status.json"
+    assert path.exists()
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["library"]["total_saves"] == 109
+
+
+def test_disk_file_has_0o600_perms_after_flush(monkeypatch, tmp_path):
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+    payload = _valid_persist_payload()
+    payload["priority"] = "final"
+    _status.receive_push(payload)
+    path = tmp_path / "status.json"
+    perms = path.stat().st_mode & 0o777
+    if sys.platform != "win32":
+        assert perms == 0o600, oct(perms)

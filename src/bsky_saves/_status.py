@@ -41,6 +41,17 @@ _memory_expires_at: float = 0.0  # monotonic; 0 == no expiry pending
 _disk_loaded: bool = False
 _disk_snapshot: Snapshot | None = None
 
+_flush_lock = threading.Lock()
+_flush_pending: bool = False
+_flush_timer: threading.Timer | None = None
+_last_flush_at: float = 0.0
+# Locking note: `_disk_snapshot` is read in `read_snapshot()` and reassigned
+# in `delete_snapshot()` without `_flush_lock`. CPython's GIL serializes the
+# single-pointer load/store, so observers see either the old or the new
+# Snapshot object — never a torn read. The flush path writes `_disk_snapshot`
+# under `_flush_lock` to pair with `_flush_pending`/`_flush_timer` updates,
+# which need atomicity *together*.
+
 
 def _status_path() -> Path:
     return _io.config_dir() / "status.json"
@@ -67,8 +78,11 @@ def receive_push(body: dict) -> None:
         # Persist mode.
         _memory_expires_at = 0.0  # No expiry in persist mode.
 
-    # Persist-mode flush logic added in Task 4.
-    _schedule_coalesced_flush()
+    # Persist-mode flush: synchronous on priority="final", else coalesced.
+    if body.get("priority") == "final":
+        _flush_to_disk_synchronously(snap)
+    else:
+        _schedule_coalesced_flush()
 
 
 def read_snapshot() -> dict | None:
@@ -145,16 +159,73 @@ def load_disk_on_startup() -> None:
 
 
 def _schedule_coalesced_flush() -> None:
-    """Placeholder; the real implementation lands in Task 4."""
-    pass
+    """Schedule a deferred flush; coalesce with any pending one.
+
+    Guarantees at most one disk write per _FLUSH_DEBOUNCE_SECONDS in steady
+    state. If a flush is already scheduled, the new push will be picked up
+    by the existing timer when it fires — no second timer is started.
+    """
+    global _flush_pending, _flush_timer
+    with _flush_lock:
+        if _flush_pending:
+            return  # A flush is already scheduled; it'll see the latest memory.
+        _flush_pending = True
+        # Always defer by the full debounce window. This gives subsequent
+        # pushes a coalescing window AND naturally caps disk writes at one
+        # per _FLUSH_DEBOUNCE_SECONDS. (Earlier draft used
+        # `_last_flush_at + DEBOUNCE - now`, but on the first-ever push
+        # `_last_flush_at == 0.0` made delay collapse to 0, so the timer
+        # would fire before subsequent pushes could land in memory.)
+        delay = _FLUSH_DEBOUNCE_SECONDS
+        _flush_timer = threading.Timer(delay, _do_flush)
+        _flush_timer.daemon = True
+        _flush_timer.start()
+
+
+def _do_flush() -> None:
+    """Background-timer callback: write the latest persist-mode snapshot."""
+    global _flush_pending, _flush_timer
+    with _lock:
+        snap = _memory_snapshot
+        # Re-check mode: if the latest push was session-mode, don't write.
+        is_session = (_memory_expires_at != 0.0)
+    if snap is None or is_session:
+        with _flush_lock:
+            _flush_pending = False
+            _flush_timer = None
+        return
+    _flush_to_disk_synchronously(snap)
+
+
+def _flush_to_disk_synchronously(snap: Snapshot) -> None:
+    """Write the snapshot's payload to disk now.
+
+    Updates _last_flush_at and _disk_snapshot. Called from the Timer callback
+    AND from the `priority: "final"` path AND from shutdown (Task 5).
+    """
+    global _last_flush_at, _disk_snapshot, _flush_pending, _flush_timer
+    body = (json.dumps(snap.payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    atomic_write_status(_status_path(), body)
+    with _flush_lock:
+        _last_flush_at = time.monotonic()
+        _disk_snapshot = snap
+        _flush_pending = False
+        _flush_timer = None
 
 
 def _reset_for_tests() -> None:
     """Test-only: clear all module state."""
     global _memory_snapshot, _memory_expires_at
     global _disk_snapshot, _disk_loaded
+    global _flush_pending, _flush_timer, _last_flush_at
     with _lock:
         _memory_snapshot = None
         _memory_expires_at = 0.0
-    _disk_snapshot = None
-    _disk_loaded = False
+    with _flush_lock:
+        _disk_snapshot = None
+        _disk_loaded = False
+        _flush_pending = False
+        if _flush_timer is not None:
+            _flush_timer.cancel()
+        _flush_timer = None
+        _last_flush_at = 0.0
