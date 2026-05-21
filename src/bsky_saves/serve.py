@@ -441,14 +441,97 @@ def _handle_hydrate_threads(handler) -> None:
     handler._send_json(200, {"threaded": threaded, "errors": errors})
 
 
+def _validate_status_payload(body: dict) -> str | None:
+    """Validate a POST /status body. Returns an error message or None.
+
+    Strict on required fields and their types; tolerates unknown fields
+    for forward compatibility. See the v0.6.7 spec §5 for the schema.
+    """
+    if not isinstance(body, dict):
+        return "body must be a JSON object"
+    if body.get("schema_version") != 1:
+        return f"invalid schema_version: {body.get('schema_version')!r} (must be 1)"
+    if not isinstance(body.get("updated_at"), str) or not body["updated_at"]:
+        return "missing or empty field: updated_at"
+    if body.get("current_state") not in {"idle", "refreshing", "hydrating", "error"}:
+        return f"invalid current_state: {body.get('current_state')!r}"
+    lib = body.get("library")
+    if not isinstance(lib, dict):
+        return "missing field: library"
+    if not isinstance(lib.get("handle"), str) or not lib["handle"]:
+        return "missing or empty field: library.handle"
+    if not isinstance(lib.get("did"), str) or not lib["did"].startswith("did:"):
+        return "missing or invalid field: library.did"
+    ts = lib.get("total_saves")
+    if not isinstance(ts, int) or ts < 0:
+        return "missing or invalid field: library.total_saves"
+    storage = body.get("storage")
+    if not isinstance(storage, dict):
+        return "missing field: storage"
+    mode = storage.get("mode")
+    if mode not in {"persist", "session"}:
+        return f"invalid storage.mode: {mode!r}"
+    if mode == "session":
+        ttl = storage.get("session_ttl_seconds")
+        if not isinstance(ttl, int) or ttl <= 0:
+            return "session mode requires positive storage.session_ttl_seconds"
+    else:
+        ttl = storage.get("session_ttl_seconds")
+        if ttl is not None:
+            return "persist mode must not set storage.session_ttl_seconds"
+    return None
+
+
+def _handle_status_post(handler) -> None:
+    body = handler._read_json_body()
+    if body is _BODY_REJECTED:
+        return
+    if not isinstance(body, dict):
+        handler._send_json_error(400, "body must be a JSON object")
+        return
+    err = _validate_status_payload(body)
+    if err is not None:
+        handler._send_json_error(400, err)
+        return
+    from . import _status
+    _status.receive_push(body)
+    handler.send_response(204)
+    handler.send_header("Content-Length", "0")
+    handler._cors_headers()
+    handler._security_headers()
+    handler.end_headers()
+
+
+def _handle_status_get(handler) -> None:
+    from . import _status
+    snap = _status.read_snapshot()
+    if snap is None:
+        handler._send_json_error(404, "no status snapshot")
+        return
+    handler._send_json(200, snap)
+
+
+def _handle_status_delete(handler) -> None:
+    from . import _status
+    _status.delete_snapshot()
+    handler.send_response(204)
+    handler.send_header("Content-Length", "0")
+    handler._cors_headers()
+    handler._security_headers()
+    handler.end_headers()
+
+
 ROUTES: dict[tuple[str, str], Callable[["_HandlerLike"], None]] = {
     ("GET", "/ping"): _handle_ping,
     ("GET", "/auth/check"): _handle_auth_check,
+    ("GET", "/status"): _handle_status_get,
     ("POST", "/fetch-image"): _handle_fetch_image,
     ("POST", "/extract-article"): _handle_extract_article,
     ("POST", "/fetch"): _handle_fetch,
     ("POST", "/enrich"): _handle_enrich,
     ("POST", "/hydrate-threads"): _handle_hydrate_threads,
+    ("POST", "/status"): _handle_status_post,
+    ("DELETE", "/status"): _handle_status_delete,
 }
 
 # Routes that bypass token authentication. /ping is the pre-pairing

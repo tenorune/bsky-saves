@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import socket
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -94,6 +95,29 @@ def paired_helper(monkeypatch, tmp_path):
     (cdir / "token").write_text(TEST_TOKEN + "\n", encoding="utf-8")
     monkeypatch.setattr("bsky_saves._io.config_dir", lambda: cdir)
     yield TEST_TOKEN
+
+
+@pytest.fixture
+def reset_status_module(monkeypatch, tmp_path):
+    """Reset _status module state and point _io.config_dir at the same temp
+    location paired_helper uses (a 'bsky-saves' subdir of tmp_path) so the
+    two fixtures compose cleanly. Yield the path so tests can assert on the
+    on-disk status.json location.
+
+    Note: paired_helper also patches _io.config_dir to tmp_path/'bsky-saves'.
+    Both fixtures share the same tmp_path (pytest scopes it per-test), so by
+    targeting the identical subdir here, whichever monkeypatch wins last
+    still resolves to the directory holding the token file. Tests can then
+    rely on `reset_status_module / "status.json"` matching the helper's
+    on-disk location.
+    """
+    from bsky_saves import _status, _io
+    cdir = tmp_path / "bsky-saves"
+    cdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(_io, "config_dir", lambda: cdir)
+    _status._reset_for_tests()
+    yield cdir
+    _status._reset_for_tests()
 
 
 def _auth_headers(token: str, extra: dict | None = None) -> dict:
@@ -2812,3 +2836,184 @@ def test_maybe_print_first_time_pairing_skipped_under_gui(
     captured = capsys.readouterr()
     assert captured.err == ""
     assert not (tmp_path / "token").exists()
+
+
+# ============================================================
+# v0.6.7: /status endpoints
+# ============================================================
+
+
+def _valid_status_payload(handle="alice.bsky.social", did="did:plc:abc"):
+    return {
+        "schema_version": 1,
+        "updated_at": "2026-05-21T20:00:00Z",
+        "current_state": "idle",
+        "library": {"handle": handle, "did": did, "total_saves": 100},
+        "storage": {"mode": "persist", "session_ttl_seconds": None},
+    }
+
+
+def test_post_status_204_on_valid_persist(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["priority"] = "final"  # Synchronous flush so the file is on disk by 204.
+    with serve_in_background() as (port, _server):
+        status, headers, resp_body = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 204
+    assert resp_body == b""
+
+
+def test_post_status_204_on_valid_session(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["storage"]["mode"] = "session"
+    body["storage"]["session_ttl_seconds"] = 60
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 204
+
+
+def test_post_status_400_on_invalid_schema_version(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["schema_version"] = 2
+    with serve_in_background() as (port, _server):
+        status, _h, resp_body = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 400
+    payload = json.loads(resp_body)
+    assert "schema_version" in payload["error"]
+
+
+def test_post_status_400_on_missing_library_did(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    del body["library"]["did"]
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 400
+
+
+def test_post_status_400_on_session_without_ttl(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["storage"]["mode"] = "session"
+    body["storage"]["session_ttl_seconds"] = None  # missing ttl
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 400
+
+
+def test_post_status_401_without_authorization(paired_helper, reset_status_module):
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="POST",
+            body=_valid_status_payload(),
+        )
+    assert status == 401
+
+
+def test_get_status_404_with_no_prior_push(paired_helper, reset_status_module):
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="GET",
+            headers=_auth_headers(paired_helper),
+        )
+    assert status == 404
+
+
+def test_get_status_200_after_persist_push(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["priority"] = "final"
+    with serve_in_background() as (port, _server):
+        _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+        status, _h, resp_body = _request(
+            port, "/status",
+            method="GET",
+            headers=_auth_headers(paired_helper),
+        )
+    assert status == 200
+    payload = json.loads(resp_body)
+    assert payload["library"]["did"] == body["library"]["did"]
+    assert payload["library"]["total_saves"] == 100
+
+
+def test_get_status_401_without_authorization(paired_helper, reset_status_module):
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="GET",
+        )
+    assert status == 401
+
+
+def test_delete_status_clears_memory_and_disk(paired_helper, reset_status_module, tmp_path):
+    body = _valid_status_payload()
+    body["priority"] = "final"
+    with serve_in_background() as (port, _server):
+        _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+        # Confirm GET returns 200 first.
+        s, _h, _b = _request(port, "/status", method="GET", headers=_auth_headers(paired_helper))
+        assert s == 200
+        # DELETE.
+        s, _h, _b = _request(port, "/status", method="DELETE", headers=_auth_headers(paired_helper))
+        assert s == 204
+        # GET now returns 404.
+        s, _h, _b = _request(port, "/status", method="GET", headers=_auth_headers(paired_helper))
+        assert s == 404
+    # Disk file is also gone.
+    assert not (reset_status_module / "status.json").exists()
+
+
+def test_delete_status_401_without_authorization(paired_helper, reset_status_module):
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(port, "/status", method="DELETE")
+    assert status == 401
+
+
+def test_persist_disk_file_has_0o600_perms(paired_helper, reset_status_module):
+    body = _valid_status_payload()
+    body["priority"] = "final"
+    with serve_in_background() as (port, _server):
+        _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    path = reset_status_module / "status.json"
+    assert path.exists()
+    if sys.platform != "win32":
+        perms = path.stat().st_mode & 0o777
+        assert perms == 0o600, oct(perms)
