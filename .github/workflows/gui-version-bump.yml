@@ -49,7 +49,7 @@ jobs:
           # GitHub releases. The dispatch token is the actual trust
           # anchor, but a misconfigured token shouldn't be able to ship a
           # tarball from arbitrary origins.
-          if ! [[ "$TARBALL_URL" =~ ^https://github\.com/tenorune/bsky-saves-gui/releases/download/v[0-9]+\.[0-9]+\.[0-9]+/dist\.tar\.gz$ ]]; then
+          if ! [[ "$TARBALL_URL" =~ ^https://github\.com/tenorune/bsky-saves-gui/releases/download/v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?/dist\.tar\.gz$ ]]; then
             echo "FAIL: untrusted tarball_url: $TARBALL_URL"; exit 1
           fi
 
