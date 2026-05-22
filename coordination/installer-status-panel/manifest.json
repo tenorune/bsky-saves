@@ -1,9 +1,13 @@
 {
-  "title": "CLI revision: resolve Q10 with GUI confirmation, tighten §4.4 current_state/last_activity.kind, raise Q11 (error semantics) and Q12 (startup-snapshot policy)",
+  "title": "CLI revision: accept GUI's Q11 and Q12 resolutions; add §4.8 Startup-flow contract; archive Q11 → R12 and Q12 → R13",
   "files": [
     {
       "source": "coordination/installer-status-panel/installer-status-panel.md",
       "target": "docs/installer-status-panel.md"
+    },
+    {
+      "source": "coordination/installer-status-panel/installer-status-panel-resolved.md",
+      "target": "docs/installer-status-panel-resolved.md"
     }
   ]
 }

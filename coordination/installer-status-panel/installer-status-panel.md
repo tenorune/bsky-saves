@@ -1,6 +1,6 @@
 # Installer status panel — cross-repo coordination doc
 
-> **Status:** drafting (2026-05-21). Installer revision: Q8 (poll cadence) resolved in §4.5 — visibility-gated polling at 5s while the popover is visible. Staleness-indicator threshold pinned at 5 minutes. No payload, endpoint, or auth changes. §7 has no remaining open questions.
+> **Status:** drafting (2026-05-22). Installer revision: R11 fully closed end-to-end — `current_state === "refreshing"` First Fetch render branch shipped, and the progress-delta inference fallback retired (no `/ping` version gate; internal dogfooding only). Q11 (`"error"` semantics) and Q12 (overwrite vs merge on startup) still awaiting CLI acceptance of the GUI-proposed resolutions in §7. No payload-shape changes.
 > **Lives at:** `bsky-saves-coordination:docs/installer-status-panel.md` (canonical). Mirrored as a draft in each primary repo's `coordination` branch and PRed back via cross-repo workflow.
 > **Audience:** maintainers of `bsky-saves` (helper / CLI), `bsky-saves-gui` (Svelte PWA), and `bsky-saves-install` (native macOS app + future Win/Linux installers).
 > **Scope:** the contract for the installer's status panel — what info it surfaces, where the info comes from, who's responsible for each leg.
@@ -185,7 +185,7 @@ Field-level notes:
 
 - `schema_version` — integer; bumps on non-backward-compatible payload changes. The panel reads older schemas and degrades gracefully (display what it understands, ignore what it doesn't).
 - `updated_at` — ISO-8601 UTC; helps the panel surface staleness when the GUI hasn't pushed recently.
-- `current_state` — one of `"idle"`, `"refreshing"`, `"hydrating"`, `"error"`. **Authoritative in-flight indicator** (per Q10): the panel reads `current_state` directly. Pre-Q10 GUI builds (≤ v0.6.5-rc.4) emit `"idle"` here while hydration is mid-flight; the installer's existing progress-delta inference (`hydration_is_progressing` + `_hydration_active_until` in `bsky_saves_launcher.popover`) is the fallback for those builds, and remains in place until the installer chooses to retire it. `"error"` means the most recent activity failed; details in `last_activity.errors`. Emission rules, stickiness, and rendering of `"error"` are still open (Q11).
+- `current_state` — one of `"idle"`, `"refreshing"`, `"hydrating"`, `"error"`. **Authoritative in-flight indicator** (per [R11](./installer-status-panel-resolved.md#r11--semantics-of-last_activitykind-vs-current_state)): the panel reads `current_state` directly. Pre-fix GUI builds (≤ v0.6.5-rc.3) emitted `"idle"` here while hydration was mid-flight; v0.6.5-rc.4 and later push the correct value. The installer's progress-delta inference fallback (`hydration_is_progressing` + `_hydration_active_until`) was retired in `tenorune/bsky-saves-install@ec32356` — `current_state` is now the panel's sole in-flight signal. No `/ping`-based version gate was added: the installer has no external user base (internal dogfooding only), so pre-rc.4 GUI compatibility was not required. `"error"` means the most recent library-refresh attempt failed; details in `last_activity.errors`. Emission rules, stickiness, and rendering of `"error"` are still open (Q11).
 - `priority` — optional top-level string; when set to `"final"` the helper bypasses its persist-mode flush coalescer and writes to disk synchronously before responding. Used by the GUI on `beforeunload` to ensure the last-known state lands on disk before tab close. Absent or any other value = treated as normal-priority (default coalesced flush). Session mode ignores this field entirely — session never writes to disk regardless. Extensible to other values (e.g., `"low"` for non-essential idle heartbeats) without a schema bump.
 - `library` — minimal identity + counts. `did` is required from sign-in onward (drives last-write-wins single-slot today, per-DID indexing later). `by_status` mirrors the v0.6.0 retention categories. Always present once the user is signed in and has a non-empty inventory.
 - `hydration` — per-feature completion. Each entry is `{completed, total}`. Optional sections; absent entries mean the GUI can't cheaply compute that metric.
@@ -253,6 +253,14 @@ Any PR that adds a field to the payload (whether in `bsky-saves-gui`'s push code
 
 This check applies symmetrically to phase 2's command payloads when that work lands.
 
+### 4.8 Startup-flow contract
+
+On GUI activation (the rising edge of the activation gate defined in `bsky-saves-gui:app/src/lib/status-pusher.ts`), the GUI pushes its restored `last_activity` and derived `current_state` unconditionally. The helper REPLACES its on-disk and in-memory snapshot with this push payload; it MUST NOT attempt to preserve any portion of its prior snapshot during a GUI-startup push. The GUI restores its own `last_activity` from local browser storage (`idb-keyval` under `status-pusher:last-activity:v1`, since v0.6.5-rc.4); a browser-data wipe on the user's side intentionally resets this to no-history.
+
+The "GUI startup wins, disk loses" direction is deliberate. The GUI is the only process that observes when operations actually start and finish; the helper just stores what the GUI told it. Merging the helper's on-disk snapshot back into the GUI's startup push (e.g., preserving an older `last_activity` because its `finished_at` is newer than anything the GUI restored from idb) would resurrect data the user explicitly cleared in the browser-wipe scenario, and would force both sides to encode timestamp-comparison logic. See [R13](./installer-status-panel-resolved.md#r13--gui-startup-snapshot-overwrite-vs-merge) for the design rationale.
+
+This contract is invariant-tested on the helper side: a wholesale-replacement assertion lives alongside the `POST /status` tests in `bsky-saves:tests/test_status.py` to prevent a future maintainer from "helpfully" adding a field-merge step.
+
 ## 5. Phase 2 — commands from panel to GUI
 
 Out of phase-1 scope. Sketch only — full design in a follow-up doc when phase 2 is on deck.
@@ -284,58 +292,11 @@ Multi-handle / multi-inventory edge cases (the maintainer setup explicitly hits 
 
 Numbered for ease of reference. Answers go inline once locked; resolved items move to [`installer-status-panel-resolved.md`](./installer-status-panel-resolved.md) with a backlink from the section they inform.
 
-**Q10 — Semantics of `last_activity.kind` vs `current_state`** *(raised by Installer 2026-05-22 for GUI team)*. Empirically the installer's panel observes `last_activity.kind = "idle"` between activity transitions (e.g., between fetch completion and hydration start; between consecutive hydration phases; during steady-state). At the same time, the GUI doesn't always set `current_state = "hydrating"` while hydration is active. This produces two related panel-side problems:
+Q10 (semantics of `last_activity.kind` vs `current_state`) resolved and moved to [R11](./installer-status-panel-resolved.md#r11--semantics-of-last_activitykind-vs-current_state). GUI fix shipped in v0.6.5-rc.4 and installer follow-ups landed on `claude/spec-installer-status-panel` in `tenorune/bsky-saves-install` (First Fetch `"refreshing"` render branch + retirement of the progress-delta inference fallback). All three R11 symptoms — mid-hydration `current_state`, post-restart `last_activity.kind`, and First Fetch blank-panel — verified resolved end-to-end against rc.4.
 
-1. **In-flight detection is unreliable.** The panel can't tell the GUI is mid-work from `current_state` alone, so it infers activity from observed hydration-progress deltas between polls (8s grace window after the last increase). Works, but means up to 8s of stale "Backing up…" persistence after hydration actually ends.
+Q11 (semantics of `current_state === "error"`) resolved and moved to [R12](./installer-status-panel-resolved.md#r12--semantics-of-current_state--error). GUI emission scoped to library-refresh-level failures only (per-asset hydration failures stay in `last_activity.errors[]`); snapshot-bound stickiness with the helper persisting `"error"` like any other state; rendering and retry affordance deferred to the panel team. The GUI tab-reload caveat — an `"error"` snapshot on the helper can be silently overwritten with `"idle"` on the next GUI activation push — is documented as a known limitation of the current GUI emission model and a candidate for a future improvement (idb persistence of the refresh-error similar to #85's `last_activity` persistence).
 
-2. **Restart loses last-activity context.** When the installer restarts, the helper rebinds and loads its persisted disk snapshot (persist mode). If the most recent GUI push had `last_activity.kind = "idle"`, the panel renders no last-activity line at all on restart — even though a real activity happened minutes ago.
-
-Proposed contract clarification, for the GUI team to confirm:
-
-- **`last_activity.kind`** = the last *completed* operation. Values: `"fetch" | "hydrate_articles" | "hydrate_threads" | "hydrate_images" | "manual_refresh"`. Monotonically advances through real operations; never reverts to `"idle"` after the first real operation (only resets to `"idle"` on `DELETE /status` / "Clear all data").
-- **`current_state`** = what the GUI is doing *right now*. Values: `"idle" | "refreshing" | "hydrating" | "error"`. This is the field that flips around during transitions; `"idle"` here is meaningful and expected during steady-state.
-
-The contract today (§4.4) lists `"idle"` as a valid `last_activity.kind`. Either keep that and clarify it's only for the fresh-install / post-clear case, or remove `"idle"` from the kind enum entirely and have the panel treat the field as required-once-an-operation-has-happened.
-
-Either resolution closes both panel-side problems: in-flight state stays canonical in `current_state`, and post-restart the persisted `last_activity` always has something meaningful to display.
-
-Installer-side: when the GUI lands the fix, the installer can retire its progress-delta inference (`hydration_is_progressing` + `_hydration_active_until` in `bsky_saves_launcher.popover`) and read `current_state` directly. No installer release needs to ship with the GUI change for this to work — the installer already handles both contract shapes.
-
-> **GUI response (2026-05-22):** confirms both behaviors are real bugs in the GUI's status-payload code, not panel-side perception. Also independently observed a third symptom during v0.6.5-rc.3 testing — panel renders blank during initial "First fetch in progress…" — same root cause as problem (1).
->
-> Root causes:
->
-> 1. **`current_state` ignores hydration stores.** `deriveCurrentState` only reads `libraryRefreshState` and `fetchProgress`; the three hydration stores (image / article / thread) aren't consulted. `current_state` drops to `"idle"` while hydration is still mid-flight.
-> 2. **`last_activity.kind` clobbered on GUI startup.** The pusher's in-memory `currentActivity` initializes to `{ kind: "idle", ... }`. Watcher transitions fire only on activity edges and don't revert — but the initial value *is* idle, and the activation rising-edge "fresh-state" push at GUI startup overwrites the helper's on-disk snapshot with that default.
->
-> Adopts the installer's proposed semantics verbatim. Tracked in [tenorune/bsky-saves-gui#85](https://github.com/tenorune/bsky-saves-gui/issues/85); fix ships in the next GUI RC.
->
-> Coordination follow-up flagged by GUI team: verify the panel has a render branch for `current_state === "refreshing"` (not just `"hydrating"`); otherwise First Fetch will continue to render blank even after the GUI fix lands.
-
-**Resolution (2026-05-22).** Semantics locked as proposed; `current_state` and `last_activity.kind` field notes in §4.4 updated accordingly. Two follow-ups land out-of-band:
-
-- **Panel: handle `current_state === "refreshing"`.** Required action on the installer side before claiming the Q10 fix works end-to-end. Tracking issue to be filed on `bsky-saves-install`.
-- **Installer cleanup (optional).** Retiring the progress-delta inference is a maintenance choice, not a gating requirement, since the installer already handles both contract shapes. If retired, gate on `gui_bundled` from `/ping` to keep older GUI pairings working.
-
-Q10 closes for semantics; this entry moves to [`installer-status-panel-resolved.md`](./installer-status-panel-resolved.md) once the GUI fix ships. Status: resolved-by-GUI.
-
-**Q11 — Semantics of `current_state === "error"`** *(raised by CLI 2026-05-22, derived from Q10 resolution)*. The Q10 resolution enumerates `"error"` as a `current_state` value, but neither side has agreed on emission, stickiness, or rendering rules. Open sub-questions:
-
-- **Emission.** Which failures trigger `"error"` — auth failure, network failure, partial-hydration failure, persistence failure, all of the above?
-- **Stickiness.** Does `"error"` persist until cleared by an explicit user action / next successful operation, or auto-clear after a transient failure?
-- **Persistence behavior.** Does the helper mirror an `"error"` `current_state` to disk like other states, or only persist the last successful snapshot? If persisted, rehydration on restart re-renders the error — desired or surprising?
-- **Panel rendering.** Toast, persistent banner, badge on the activity row, or all of the above? Is there a "retry" affordance, and if so what does the panel dispatch back to the GUI?
-
-Required before any RC that emits `current_state === "error"` in anger. Status: proposed-by-CLI.
-
-**Q12 — GUI-startup snapshot: overwrite vs merge** *(raised by CLI 2026-05-22, derived from Q10 Bug 2 root cause)*. Q10's root cause for Bug 2 surfaces a separate question independent of the kind/state semantics: every GUI startup currently clobbers the helper's on-disk snapshot with the GUI's just-initialized in-memory state. After the Q10 fix the clobbered value will at least be accurate — but the underlying "GUI startup wins, disk loses" contract isn't explicit anywhere in §4.4 or §6.
-
-Options:
-
-- **Overwrite (status quo, post-fix).** GUI startup push always wins. Simple. Implies the GUI's just-started in-memory state is always authoritative — fine if the GUI restores its own state quickly on startup.
-- **Merge.** GUI startup push respects on-disk `last_activity` if its `finished_at` is newer than anything the GUI has in memory. Safer against future regressions where the GUI's startup state momentarily lags. More complex; requires a timestamp comparison and conflict rule.
-
-Either is defensible. The choice should be documented in §4.4 or §6 (whichever section governs the startup-flow contract). Picking now avoids re-litigating after the next surprise. Status: proposed-by-CLI.
+Q12 (GUI-startup snapshot: overwrite vs merge) resolved and moved to [R13](./installer-status-panel-resolved.md#r13--gui-startup-snapshot-overwrite-vs-merge). Locked **overwrite** — post-#85 the GUI's startup push carries `last_activity` restored from `idb-keyval`, so overwrite preserves the user's last-known state rather than clobbering it with empty defaults. Contract codified as new [§4.8](#48-startup-flow-contract); helper-side wholesale-replacement invariant pinned by a test in `bsky-saves:tests/test_status.py`.
 
 ## 8. Maintenance
 
@@ -364,6 +325,9 @@ When the design changes substantively (e.g., adopting phase 2's command flow), b
 | 2026-05-21 | Installer | Resolved Q8 in §4.5: visibility-gated polling — one fetch on popover show, every 5s while the popover is visible, no polling while closed. Co-fetches `/status` on the same 5s timer that already drives the menu-bar state badge (no second timer, no extra wake-ups). Pinned the staleness-indicator threshold to 5 minutes (was "e.g., 5 minutes" suggestion). No payload, endpoint, auth, or schema changes. Moved Q8 to appendix as R10. §7 now empty (all phase-1 questions resolved). Updated Appendix A to check off the polling-cadence item. |
 | 2026-05-22 | Installer | Raised Q10: `last_activity.kind` semantics. Observed in v0.4.0 RC testing against `bsky-saves==0.6.8rc1` — the GUI emits `last_activity.kind = "idle"` between activity transitions and during steady-state, which (a) makes in-flight state inference unreliable from the panel side (currently mitigated by tracking hydration-progress deltas across polls with an 8s grace window), and (b) loses last-activity context on installer restart (persisted disk snapshot has `kind="idle"`, panel renders no last-activity line). Proposes clarifying that `last_activity.kind` is the last *completed* operation (never reverts to `"idle"` once anything has happened) and `current_state` is the right-now field. Awaiting GUI team review. No body content changes in this PR. |
 | 2026-05-22 | CLI | Resolved Q10 in §7 with GUI confirmation (tenorune/bsky-saves-gui#85): both behaviors confirmed as GUI-side bugs (root causes in `deriveCurrentState` and `currentActivity` startup default); proposed semantics adopted verbatim. Tightened `current_state` and `last_activity.kind` field notes in §4.4 (semantics, not enums — `"idle"` retained as fresh-install / post-clear sentinel for `last_activity.kind`). Captured GUI team's panel-side follow-up (verify `current_state === "refreshing"` render branch) and the optional installer-side cleanup gating note in Q10's resolution. Raised Q11 (`"error"` semantics — emission/stickiness/persistence/rendering) and Q12 (GUI-startup snapshot overwrite vs merge contract) in §7. |
+| 2026-05-22 | GUI | Q10 fix shipped: tenorune/bsky-saves-gui#85 merged to main, released in v0.6.5-rc.4. Moved Q10 from §7 to appendix as R11 with implementation status (mid-hydration + post-restart symptoms verified resolved against rc.4; First Fetch blank-panel symptom awaits the installer's `current_state === "refreshing"` render branch). Corrected the §4.4 `current_state` field note's pre-fix version reference (≤ v0.6.5-rc.3, not ≤ rc.4 — rc.4 is the first build with the fix). Answered Q11 with GUI-proposed resolution: emission scoped to library-refresh-level failures only (per-asset hydration failures stay in `last_activity.errors[]`); snapshot-bound stickiness with helper persisting `"error"` like any other state; rendering/retry deferred to panel team; called out the GUI-tab-reload caveat (current GUI doesn't re-emit `"error"` after reload, so a snapshot can be silently overwritten with `"idle"` — known limitation, candidate for a future improvement). Answered Q12 with GUI-proposed resolution: keep overwrite (status quo, post-#85). Proposed contract text for the startup-flow contract; suggested placement in §4.4 or a new §4.8. Q11 and Q12 both status: proposed-by-GUI, awaiting CLI acceptance. No payload-shape changes in this revision. |
+| 2026-05-22 | Installer | Closed R11 end-to-end. Shipped the `current_state === "refreshing"` render branch on `claude/spec-installer-status-panel` (`bsky-saves-install`): placeholder headline reads "Fetching library…" pre-handle, last-activity row reads "Refreshing…" / "Backing up…" inline once a library is identified (commit `73e035e`). Retired the progress-delta inference fallback (`status.hydration_is_progressing`, `StatusPopover._hydration_active_until`, the delta-detection branch in `update_library`, and associated tests) — panel now reads `snap.current_state` directly (commit `ec32356`). No `/ping`-based `gui_bundled` gate added: no external installer user base, internal dogfooding only. Updated R11 verification + §4.4 `current_state` field note + §3 status header to reflect closure. No payload, endpoint, auth, or schema changes. |
+| 2026-05-22 | CLI | Accepted GUI's Q11 and Q12 resolutions; moved Q11 → [R12](./installer-status-panel-resolved.md#r12--semantics-of-current_state--error) and Q12 → [R13](./installer-status-panel-resolved.md#r13--gui-startup-snapshot-overwrite-vs-merge). Added §4.8 (Startup-flow contract) with the GUI's proposed contract text describing the helper's wholesale-replacement obligation on GUI activation pushes. Cross-referenced the helper-side invariant test landing on `bsky-saves:tests/test_status.py` (separate commit on `tenorune/bsky-saves@main`). No payload-shape changes; §4.4 unchanged in this revision. |
 
 ---
 
@@ -372,7 +336,7 @@ When the design changes substantively (e.g., adopting phase 2's command flow), b
 A condensed checklist for whoever drives phase 1 to ground. None of these are open design questions; they're sequencing-and-ownership decisions.
 
 - [ ] Confirm helper-side endpoints (`POST /status`, `GET /status`, `DELETE /status`) and persistence path with the `bsky-saves` maintainer.
-- [ ] GUI team commits to the §4.4 payload shape (final shape locks once §7 is empty and all teams have confirmed their slice — §7 is now empty; awaiting GUI confirmation).
+- [ ] GUI team commits to the §4.4 payload shape (final shape locks once §7 is empty and all teams have confirmed their slice — §7 holds Q11/Q12, both currently proposed-by-GUI awaiting CLI acceptance, no payload-shape changes in either).
 - [x] Installer team confirms polling cadence (Q8 resolved 2026-05-21 — see [R10](./installer-status-panel-resolved.md#r10--installer-poll-cadence)). UI rendering pass pending implementation in `bsky-saves-install`.
 - [x] Resolved-questions companion file (`installer-status-panel-resolved.md`) seeded and present at coord repo's `main` (closed by GUI 2026-05-20 — see [R9](./installer-status-panel-resolved.md#r9--resolved-questions-archive-companion-file-missing)).
 - [ ] Spec docs open in each primary repo (`docs/superpowers/specs/YYYY-MM-DD-status-snapshot.md` per the project convention); plan docs follow; implementation goes through the existing subagent-driven-development flow.
