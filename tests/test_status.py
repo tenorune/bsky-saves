@@ -470,3 +470,102 @@ def test_flush_synchronously_skips_session_mode(monkeypatch, tmp_path):
     _status.flush_synchronously()
     # No disk write; the privacy contract is preserved on shutdown.
     assert not (tmp_path / "status.json").exists()
+
+
+def test_post_status_wholesale_replacement_no_field_leakage(monkeypatch, tmp_path):
+    """A POST /status fully replaces the prior snapshot — no field leakage.
+
+    Pins the §4.8 Startup-flow-contract invariant from
+    bsky-saves-coordination:docs/installer-status-panel.md — "the helper
+    REPLACES its on-disk and in-memory snapshot with this push payload;
+    it MUST NOT attempt to preserve any portion of its prior snapshot
+    during a GUI-startup push." The helper cannot distinguish a startup
+    push from any other push, so the invariant applies to every push.
+
+    Catches the regression where a future maintainer adds a field-merge
+    step (e.g., preserving prior library.did because a future GUI payload
+    omits it, or preserving last_activity.errors[] across pushes because
+    a new push has an empty list).
+    """
+    from bsky_saves import _status, _io
+    monkeypatch.setattr(_io, "config_dir", lambda: tmp_path)
+
+    # Push A — every field has a distinctive value at every nesting level.
+    push_a = {
+        "schema_version": 1,
+        "updated_at": "2026-01-01T00:00:00Z",
+        "current_state": "hydrating",
+        "library": {
+            "handle": "alice.bsky.social",
+            "did": "did:plc:aaaaaaaa",
+            "total_saves": 1000,
+            "by_status": {"synced": 990, "lost": 8, "unsaved": 2},
+        },
+        "hydration": {
+            "articles": {"completed": 700, "total": 1000},
+            "threads": {"completed": 400, "total": 1000},
+            "images": {"completed": 850, "total": 1000},
+        },
+        "storage": {
+            "mode": "persist",
+            "session_ttl_seconds": None,
+            "browser_bytes_estimate": 12345,
+        },
+        "last_activity": {
+            "kind": "hydrate_articles",
+            "started_at": "2025-12-31T23:00:00Z",
+            "finished_at": "2025-12-31T23:30:00Z",
+            "added": 5,
+            "removed": 0,
+            "errors": [{"kind": "thread_fetch_failed", "message": "network", "count": 1}],
+        },
+        "priority": "final",
+    }
+    _status.receive_push(push_a)
+
+    # Push B — minimal payload that OMITS several keys push_a had
+    # (hydration, last_activity, library.by_status, storage.browser_bytes_estimate).
+    # Simulates a GUI-activation push where the GUI restored its state from
+    # idb-keyval (per bsky-saves-gui:#85) but has no prior hydration or
+    # activity history yet (e.g., a fresh idb after the user wiped browser
+    # data — the legitimate scenario the §4.8 contract's overwrite-wins
+    # rule is designed to handle correctly). A merge step that preserved
+    # any of these omitted keys from push_a would be a contract violation.
+    push_b = {
+        "schema_version": 1,
+        "updated_at": "2026-06-15T12:00:00Z",
+        "current_state": "idle",
+        "library": {
+            "handle": "bob.bsky.social",
+            "did": "did:plc:bbbbbbbb",
+            "total_saves": 0,
+        },
+        "storage": {
+            "mode": "persist",
+            "session_ttl_seconds": None,
+        },
+        "priority": "final",
+    }
+    _status.receive_push(push_b)
+
+    # In-memory: deep equality on the snapshot dict catches any field that
+    # leaked from push_a (e.g., a merge step preserving push_a's
+    # last_activity.errors[0] because push_b's errors is []).
+    snap = _status.read_snapshot()
+    assert snap == push_b, (
+        f"In-memory snapshot is not exactly push_b — field leakage from push_a.\n"
+        f"  got:  {snap}\n"
+        f"  want: {push_b}"
+    )
+
+    # On-disk: priority='final' on push_b forced a synchronous flush, so
+    # the file content equals push_b. This pins the disk half of the
+    # §4.8 invariant ("REPLACES its on-disk and in-memory snapshot").
+    disk_path = tmp_path / "status.json"
+    assert disk_path.exists(), "persist-mode push should have produced status.json on disk"
+    disk_payload = json.loads(disk_path.read_text(encoding="utf-8"))
+    assert disk_payload == push_b, (
+        f"On-disk snapshot is not exactly push_b — field leakage from push_a.\n"
+        f"  got:  {disk_payload}\n"
+        f"  want: {push_b}"
+    )
