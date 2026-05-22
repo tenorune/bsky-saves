@@ -127,3 +127,40 @@ def test_config_dir_windows_no_appdata(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows Path.home() uses USERPROFILE
     assert config_dir() == tmp_path / "AppData" / "Roaming" / "bsky-saves"
+
+
+def test_atomic_write_status_creates_file_with_0o600_perms(tmp_path):
+    from bsky_saves._io import atomic_write_status
+    path = tmp_path / "subdir" / "status.json"
+    atomic_write_status(path, b'{"k": "v"}\n')
+    assert path.exists()
+    assert path.read_bytes() == b'{"k": "v"}\n'
+    perms = path.stat().st_mode & 0o777
+    if sys.platform != "win32":
+        assert perms == 0o600, oct(perms)
+
+
+def test_atomic_write_status_creates_parent_dir_with_0o700(tmp_path):
+    from bsky_saves._io import atomic_write_status
+    path = tmp_path / "new-parent-dir" / "status.json"
+    atomic_write_status(path, b'{}\n')
+    assert path.parent.is_dir()
+    if sys.platform != "win32":
+        parent_perms = path.parent.stat().st_mode & 0o777
+        assert parent_perms == 0o700, oct(parent_perms)
+
+
+def test_atomic_write_status_overwrites_existing(tmp_path):
+    from bsky_saves._io import atomic_write_status
+    path = tmp_path / "status.json"
+    atomic_write_status(path, b'{"v": 1}\n')
+    atomic_write_status(path, b'{"v": 2}\n')
+    assert path.read_bytes() == b'{"v": 2}\n'
+
+
+def test_atomic_write_status_leaves_no_tmp_sidecar(tmp_path):
+    from bsky_saves._io import atomic_write_status
+    path = tmp_path / "status.json"
+    atomic_write_status(path, b'{}\n')
+    siblings = list(path.parent.iterdir())
+    assert siblings == [path], f"expected only {path.name}, got {[s.name for s in siblings]}"

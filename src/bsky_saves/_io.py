@@ -6,6 +6,7 @@ import json
 import os
 import secrets
 import sys
+import tempfile
 from pathlib import Path
 
 _TOKEN_BYTES = 32
@@ -83,3 +84,31 @@ def atomic_write_inventory(path: Path, inv: dict) -> None:
         encoding="utf-8",
     )
     os.replace(tmp, path)
+
+
+def atomic_write_status(path: Path, body: bytes) -> None:
+    """Atomic-write the status snapshot to disk with per-write unique tmp names.
+
+    Used by _status._flush_to_disk_synchronously and the background flush
+    callback. Per-write unique tmp names (via tempfile.NamedTemporaryFile)
+    are defense-in-depth against a future contributor running the same
+    writer from multiple threads — today's caller is single-threaded by
+    design, but the broader inventory writer's single-tmp-name scheme races
+    under concurrent calls and we don't want to inherit that hazard here.
+
+    Args:
+        path: target file path. Parent dir is created with 0o700 if absent.
+        body: bytes to write. Caller is responsible for encoding (utf-8).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        delete=False,
+        dir=path.parent,
+        prefix=path.name + ".",
+        suffix=".tmp",
+    ) as tmp:
+        tmp.write(body)
+        tmp_path = Path(tmp.name)
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, path)
