@@ -3113,3 +3113,115 @@ def test_post_status_400_on_bool_session_ttl(paired_helper, reset_status_module)
             body=body,
         )
     assert status == 400
+
+
+# -------------------------------------------------------------------------
+# coord-doc §4.4 / Q13: library is optional during cold-start / pre-sign-in.
+# -------------------------------------------------------------------------
+
+def test_post_status_204_when_library_absent(paired_helper, reset_status_module):
+    """library may be absent per coord §4.4 (cold-start before inventory loads).
+
+    Before Q13 the helper returned 400 here, which silently broke the GUI's
+    cold-start push (the GUI's pushOnce swallowed the 400 and the panel
+    polled 404 forever — see installer Q13). The validator now accepts
+    library-absent payloads; sub-field validation still fires when the
+    block is present.
+    """
+    body = _valid_status_payload()
+    del body["library"]
+    with serve_in_background() as (port, _server):
+        status, _h, _b = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 204
+
+
+def test_post_status_400_when_library_present_but_total_saves_null(
+    paired_helper, reset_status_module
+):
+    """library present with null total_saves still fails — sub-field validation
+    is unchanged from before Q13; only library-absent is newly tolerated.
+    """
+    body = _valid_status_payload()
+    body["library"]["total_saves"] = None
+    with serve_in_background() as (port, _server):
+        status, _h, resp = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 400
+    payload = json.loads(resp)
+    assert "library.total_saves" in payload["error"]
+
+
+def test_post_status_400_when_library_present_but_not_an_object(
+    paired_helper, reset_status_module
+):
+    """library: 'string-not-an-object' is malformed and rejected.
+
+    Catches the failure mode where a misformed push has `library` set to a
+    non-dict value — distinct from library-absent (accepted) and library-
+    present-but-incomplete (rejected by sub-field check).
+    """
+    body = _valid_status_payload()
+    body["library"] = "not-a-dict"
+    with serve_in_background() as (port, _server):
+        status, _h, resp = _request(
+            port, "/status",
+            method="POST",
+            headers=_auth_headers(paired_helper),
+            body=body,
+        )
+    assert status == 400
+    payload = json.loads(resp)
+    assert "library" in payload["error"]
+
+
+def test_post_status_library_absent_push_wholesale_replaces_library_present(
+    paired_helper, reset_status_module
+):
+    """A library-absent push fully replaces a prior library-present snapshot.
+
+    Pins the §4.8 wholesale-replacement invariant against the Q13 path: if a
+    future maintainer added a "preserve library when new push omits it" merge
+    step (with the well-meaning rationale "the user is still the same person,
+    don't lose their library identity"), this test catches it.
+    """
+    library_present = _valid_status_payload(handle="alice.bsky.social", did="did:plc:abc")
+    library_absent = _valid_status_payload()
+    del library_absent["library"]
+    library_absent["updated_at"] = "2026-06-15T12:00:00Z"
+    library_absent["current_state"] = "refreshing"
+
+    with serve_in_background() as (port, _server):
+        # First push: library present.
+        s1, _, _ = _request(
+            port, "/status", method="POST",
+            headers=_auth_headers(paired_helper), body=library_present,
+        )
+        assert s1 == 204
+        # Second push: library absent — must overwrite, not merge.
+        s2, _, _ = _request(
+            port, "/status", method="POST",
+            headers=_auth_headers(paired_helper), body=library_absent,
+        )
+        assert s2 == 204
+        # Read back.
+        s3, _, resp = _request(
+            port, "/status", method="GET",
+            headers=_auth_headers(paired_helper),
+        )
+    assert s3 == 200
+    got = json.loads(resp)
+    assert "library" not in got, (
+        f"library leaked through from prior snapshot: {got.get('library')!r}"
+    )
+    # Sanity: the rest of the second push is reflected too.
+    assert got["current_state"] == "refreshing"
+    assert got["updated_at"] == "2026-06-15T12:00:00Z"
