@@ -455,16 +455,21 @@ def _validate_status_payload(body: dict) -> str | None:
         return "missing or empty field: updated_at"
     if body.get("current_state") not in {"idle", "refreshing", "hydrating", "error"}:
         return f"invalid current_state: {body.get('current_state')!r}"
-    lib = body.get("library")
-    if not isinstance(lib, dict):
-        return "missing field: library"
-    if not isinstance(lib.get("handle"), str) or not lib["handle"]:
-        return "missing or empty field: library.handle"
-    if not isinstance(lib.get("did"), str) or not lib["did"].startswith("did:"):
-        return "missing or invalid field: library.did"
-    ts = lib.get("total_saves")
-    if not isinstance(ts, int) or isinstance(ts, bool) or ts < 0:
-        return "missing or invalid field: library.total_saves"
+    # `library` is optional per coord-doc §4.4: "always present once the user
+    # is signed in and has a non-empty inventory" — i.e., MAY be absent
+    # before sign-in or while inventory is still loading (R14 / cold-start
+    # First Fetch). Validate sub-fields only when the block is present.
+    if "library" in body:
+        lib = body["library"]
+        if not isinstance(lib, dict):
+            return "if present, library must be an object"
+        if not isinstance(lib.get("handle"), str) or not lib["handle"]:
+            return "missing or empty field: library.handle"
+        if not isinstance(lib.get("did"), str) or not lib["did"].startswith("did:"):
+            return "missing or invalid field: library.did"
+        ts = lib.get("total_saves")
+        if not isinstance(ts, int) or isinstance(ts, bool) or ts < 0:
+            return "missing or invalid field: library.total_saves"
     storage = body.get("storage")
     if not isinstance(storage, dict):
         return "missing field: storage"
