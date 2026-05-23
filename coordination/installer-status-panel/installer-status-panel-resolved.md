@@ -273,3 +273,71 @@ Key context that made overwrite the right call: **post-#85, the GUI's startup pu
 - ✅ **GUI behavior matches the contract** as of v0.6.5-rc.4 (the startup-push payload structure was established by #85).
 
 No payload-shape changes. Contract clarification only.
+
+---
+
+## R14 — Cold-start library-absent acceptance
+
+**Raised by:** Installer (2026-05-23) as §7 Q13, observed in v0.4.0 RC testing against `bsky-saves==0.6.8rc2` + `bsky-saves-gui` v0.6.5-rc.4.
+**Diagnosed by:** GUI (2026-05-23) — root-caused to a CLI-side §4.4 contract violation, not a missing push trigger.
+**Resolved by:** GUI in v0.6.5 (commit `31486ff` reverting `e33a87a`); CLI in `bsky-saves==0.6.8rc3`, bundled in `bsky-saves==0.6.8` final.
+
+**Symptom (Installer's framing):** During cold-start First Fetch on a fresh pairing, the helper holds no persisted snapshot. The panel polls `GET /status`, receives `404 {"error": "no status snapshot"}` for the entire duration of the fetch, and `_render_library_section` sees `snap = None` → renders the static placeholder "No active library status yet." for the whole fetch. When the fetch finishes, the GUI pushes the full populated snapshot in one go and the panel jumps from the static placeholder straight to the fully-loaded library view — no in-flight feedback is ever shown.
+
+The installer's R11 closure shipped a `current_state === "refreshing"` render branch in `_render_library_section` that handles the "GUI has reported a refresh but no library handle yet" case. But that branch can't fire in the cold-start window because the GUI never pushes any `current_state` (the snapshot just never lands on the helper).
+
+**Installer's original proposed resolution (superseded by the GUI's diagnosis below):** add a push trigger at the start of `initialFetchSaves()` so the pusher emits `{ current_state: "refreshing", library.did: <known-from-sign-in>, library.handle: null }` to populate the cold-start window. No payload-shape change — just an additional push trigger in §4.3.
+
+**GUI's root-cause diagnosis (2026-05-23):** the symptom is real but the root cause is **not** a missing push trigger. The GUI was already pushing at activation rising edge and at libraryRefreshState transition. Every cold-start push was rejected by the helper:
+
+1. Sign-in → GUI's `pushOnce` builds a payload with `library.total_saves: null` (the inventory is still loading; no real count yet).
+2. `POST /status` → helper returns `HTTP 400 {"error": "missing or invalid field: library.total_saves"}`.
+3. The GUI's `pushOnce` only handles 401 explicitly; the 400 is silently swallowed — no retry, no console signal, no UI banner.
+4. Every subsequent push during cold-start hits the same 400 for the same reason.
+5. Panel polls `GET /status` and sees 404 throughout because the helper has never accepted a snapshot.
+
+The rejection itself is the contract violation: §4.4 says `library` is "always present once the user is signed in **and** has a non-empty inventory" — i.e., MAY be absent before sign-in or while inventory is still loading. The helper was unconditionally requiring it.
+
+**Resolution:** paired fix on both sides; no contract amendment, just implementation aligning with documented prose.
+
+- **GUI `bsky-saves-gui` v0.6.5** (commit `31486ff` on `claude/bsky-saves-gui-work-5VmfX`):
+  - `buildStatusPayload` omits the `library` field entirely when `inventoryState.status !== 'ready'`.
+  - Once the inventory loads (status flips to `'ready'`), the next push within the 500 ms debounce includes the full library block with real counts.
+  - The payload-shape type makes `library` optional and `library.total_saves` non-nullable when present (no `null` ever emitted).
+  - Push trigger set unchanged.
+
+- **CLI `bsky-saves==0.6.8` (final, originally shipped in `0.6.8rc3`)**:
+  - `_validate_status_payload` in `src/bsky_saves/serve.py` treats `library` as optional in the request validator. When absent, the helper accepts the payload (204) and `_status.receive_push` persists it as-is (no `library` field). `GET /status` returns the snapshot as-stored — no `library` field if it wasn't sent.
+  - Sub-field validation (`handle` string, `did: did:*` prefix, `total_saves` non-negative int and not bool) still fires when the block IS present.
+  - Pinned by tests in `bsky-saves:tests/test_serve.py`:
+    - `test_post_status_204_when_library_absent`
+    - `test_post_status_400_when_library_present_but_total_saves_null`
+    - `test_post_status_400_when_library_present_but_not_an_object`
+    - `test_post_status_library_absent_push_wholesale_replaces_library_present` — joint pin against R13's wholesale-replacement invariant: a library-absent push must overwrite a library-present prior snapshot cleanly (no library leak through a hypothetical "preserve library" merge step).
+  - §4.4 `library` prose tightened to make the optionality explicit ("MAY be absent before sign-in or while inventory is still loading") with a forward-reference to this R14 entry.
+
+**Trade-off considered and rejected by the GUI side: `library.total_saves: 0` placeholder.** An earlier GUI fix kept the `library` block always present and used `total_saves: 0` + `by_status: {0,0,0}` during cold-start. Implemented in commit `e33a87a`, reverted in `31486ff`. Rejected because:
+
+- **Misrepresents state.** "0 saves" means "the user has zero saves." During cold-start the count is unknown — sending `0` lies on the wire and the panel UI surfaces the lie.
+- **Conflates two distinct states.** "Cold-start in progress" and "user legitimately has zero saves" become indistinguishable to the panel.
+- **Cascades misinformation into `by_status`.** Three more fields ({0,0,0}) carry the same lie.
+- **Wrong panel render branch.** The installer's R11 closure renders inline "Refreshing…" once a library is identified; the cold-start window should reach the "Fetching library…" placeholder branch instead. `total_saves: 0` + handle present puts us in the wrong branch.
+- **Codifies a shape we'd want to walk back.** Once the helper relaxes, the cleanest shape is omit-library to reach the placeholder branch — shipping `total_saves: 0` first would have forced a second GUI change reverting it. Better to ship the right shape first time.
+
+**Verification status:**
+
+- ✅ Cold-start push lands on the helper (no more 400 rejection) — `bsky-saves==0.6.8` + `bsky-saves-gui` v0.6.5 paired.
+- ✅ Panel renders "Fetching library…" via R11's existing "no library identified" branch throughout the cold-start window — verified end-to-end by the installer team against the paired stable release.
+- ✅ Subsequent refreshes continue to work — once inventory loads, the next push includes the full `library` block and the panel transitions from "Fetching library…" → "Refreshing…" → loaded view, all driven by `current_state` transitions per R11.
+
+**What stays unchanged:**
+
+- Payload shape contract — no field added, no field removed. The helper catching up to the prose, not a contract amendment.
+- Push triggers (§4.3) — no new trigger needed. The activation rising edge + libraryRefreshState transition already cover the cold-start window.
+- Auth, polling cadence, persistence rules — none of these change.
+
+**Tracked separately (not blocking, not part of R14):**
+
+- GUI's `pushOnce` silently swallows non-401 errors. Filed as `tenorune/bsky-saves-gui#88`. Hardening item on the GUI side; would have surfaced the 400-rejection chain immediately had it been in place. Tracked outside the coord doc.
+
+No payload-shape changes. R14 closes phase 1 of this coord doc for the trio (Q1–Q13 → R1–R14 all archived).

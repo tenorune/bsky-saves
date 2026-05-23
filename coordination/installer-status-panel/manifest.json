@@ -1,5 +1,5 @@
 {
-  "title": "CLI revision: accept GUI's Q11 and Q12 resolutions; add §4.8 Startup-flow contract; archive Q11 → R12 and Q12 → R13",
+  "title": "CLI revision: resolve Q13 and archive to R14 (library-optional accepted in bsky-saves==0.6.8); tighten §4.4 library prose; close phase 1 of the trio (Q1–Q13 → R1–R14)",
   "files": [
     {
       "source": "coordination/installer-status-panel/installer-status-panel.md",
